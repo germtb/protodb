@@ -27,17 +27,15 @@ type EntryInput struct {
 	Key          string
 	Value        []byte
 	Grouping     string
-	SortingIndex *int64
-	Timestamp    *int64 // Optional: if provided, will be used instead of current time
+	SortingIndex int64
 }
 
 type DbEntry struct {
-	Timestamp    int64
 	Type         string
 	Key          string
 	Value        []byte
 	Grouping     string
-	SortingIndex *int64
+	SortingIndex int64
 }
 
 func RootPath() string {
@@ -70,7 +68,6 @@ func Init(namespace []string, name string) (*Database, error) {
 	createTableSQL := `CREATE TABLE IF NOT EXISTS entries (
 		"key" TEXT NOT NULL,
 		"type" TEXT NOT NULL,
-    	"timestamp" INTEGER NOT NULL,
 		"grouping" TEXT,
 		"sortingIndex" INTEGER,
 		"value" BLOB,
@@ -80,7 +77,6 @@ func Init(namespace []string, name string) (*Database, error) {
 		CREATE INDEX IF NOT EXISTS idx_entries_key ON entries(type);
 		CREATE INDEX IF NOT EXISTS idx_entries_grouping ON entries(type, grouping);
 		CREATE INDEX IF NOT EXISTS idx_entries_sorting_index ON entries(type, sortingIndex);
-		CREATE INDEX IF NOT EXISTS idx_entries_timestamp ON entries(type, timestamp);
 	`
 
 	_, err = connection.Exec(createTableSQL)
@@ -119,10 +115,10 @@ func (db *Database) Get(entryType string, key string) (*DbEntry, error) {
 		return nil, ErrNoDbConnection
 	}
 
-	row := db.connection.QueryRow("SELECT timestamp, type, value, key, grouping, sortingIndex FROM entries WHERE type = ? AND key = ?", entryType, key)
+	row := db.connection.QueryRow("SELECT type, value, key, grouping, sortingIndex FROM entries WHERE type = ? AND key = ?", entryType, key)
 
 	var entry DbEntry
-	err := row.Scan(&entry.Timestamp, &entry.Type, &entry.Value, &entry.Key, &entry.Grouping, &entry.SortingIndex)
+	err := row.Scan(&entry.Type, &entry.Value, &entry.Key, &entry.Grouping, &entry.SortingIndex)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil // No entry found
@@ -148,7 +144,7 @@ func (db *Database) BulkGet(entryType string, keys []string) (map[string]DbEntry
 	placeholders := strings.Repeat("?,", len(keys))
 	placeholders = placeholders[:len(placeholders)-1] // Remove trailing comma
 
-	query := fmt.Sprintf("SELECT timestamp, type, value, key, grouping, sortingIndex FROM entries WHERE key IN (%s) AND type = ?", placeholders)
+	query := fmt.Sprintf("SELECT type, value, key, grouping, sortingIndex FROM entries WHERE key IN (%s) AND type = ?", placeholders)
 
 	args := make([]interface{}, len(keys)+1)
 	for i, key := range keys {
@@ -166,7 +162,7 @@ func (db *Database) BulkGet(entryType string, keys []string) (map[string]DbEntry
 
 	for rows.Next() {
 		var entry DbEntry
-		if err := rows.Scan(&entry.Timestamp, &entry.Type, &entry.Value, &entry.Key, &entry.Grouping, &entry.SortingIndex); err != nil {
+		if err := rows.Scan(&entry.Type, &entry.Value, &entry.Key, &entry.Grouping, &entry.SortingIndex); err != nil {
 			return nil, err
 		}
 		entries[entry.Key] = entry
@@ -186,18 +182,13 @@ func (db *Database) Upsert(entry EntryInput) error {
 		return ErrNoDbConnection
 	}
 
-	stmt, err := db.connection.Prepare("INSERT OR REPLACE INTO entries(type, value, timestamp, key, grouping, sortingIndex) VALUES(?, ?, ?, ?, ?, ?)")
+	stmt, err := db.connection.Prepare("INSERT OR REPLACE INTO entries(type, value, key, grouping, sortingIndex) VALUES(?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
-	timestamp := time.Now().UnixMilli()
-	if entry.Timestamp != nil {
-		timestamp = *entry.Timestamp
-	}
-
-	_, err = stmt.Exec(entry.Type, entry.Value, timestamp, entry.Key, entry.Grouping, entry.SortingIndex)
+	_, err = stmt.Exec(entry.Type, entry.Value, entry.Key, entry.Grouping, entry.SortingIndex)
 
 	return err
 }
@@ -310,7 +301,7 @@ func (db *Database) BulkUpsert(entries []EntryInput) error {
 		return err
 	}
 
-	stmt, err := tx.Prepare("INSERT OR REPLACE INTO entries(type, value, timestamp, key, grouping, sortingIndex) VALUES(?, ?, ?, ?, ?, ?)")
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO entries(type, value, key, grouping, sortingIndex) VALUES(?, ?, ?, ?, ?)")
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -318,11 +309,7 @@ func (db *Database) BulkUpsert(entries []EntryInput) error {
 	defer stmt.Close()
 
 	for _, e := range entries {
-		timestamp := time.Now().UnixMilli()
-		if e.Timestamp != nil {
-			timestamp = *e.Timestamp
-		}
-		if _, err := stmt.Exec(e.Type, e.Value, timestamp, e.Key, e.Grouping, e.SortingIndex); err != nil {
+		if _, err := stmt.Exec(e.Type, e.Value, e.Key, e.Grouping, e.SortingIndex); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -350,13 +337,6 @@ func (db *Database) Count() (int64, error) {
 	return count, nil
 }
 
-type SortField int
-
-const (
-	SortByTimestamp SortField = iota
-	SortBySortingIndex
-)
-
 type SortOrder int
 
 const (
@@ -371,7 +351,6 @@ type QueryParams struct {
 	Limit     *int
 	Offset    *int
 	Grouping  *string
-	SortField SortField
 	SortOrder SortOrder
 }
 
@@ -385,7 +364,7 @@ func (db *Database) Query(
 		return nil, ErrNoDbConnection
 	}
 
-	query := "SELECT timestamp, type, value, key, grouping, sortingIndex FROM entries WHERE 1=1"
+	query := "SELECT type, value, key, grouping, sortingIndex FROM entries WHERE 1=1"
 
 	var args []interface{}
 
@@ -395,12 +374,12 @@ func (db *Database) Query(
 	}
 
 	if params.From != nil {
-		query += " AND timestamp >= ?"
+		query += " AND sortingIndex >= ?"
 		args = append(args, *params.From)
 	}
 
 	if params.To != nil {
-		query += " AND timestamp <= ?"
+		query += " AND sortingIndex <= ?"
 		args = append(args, *params.To)
 	}
 
@@ -414,12 +393,7 @@ func (db *Database) Query(
 		order = "ASC"
 	}
 
-	switch params.SortField {
-	case SortByTimestamp:
-		query += " ORDER BY timestamp " + order
-	case SortBySortingIndex:
-		query += " ORDER BY sortingIndex " + order
-	}
+	query += " ORDER BY sortingIndex " + order
 
 	if params.Limit != nil {
 		query += " LIMIT ?"
@@ -439,7 +413,7 @@ func (db *Database) Query(
 	var entries []DbEntry
 	for rows.Next() {
 		var entry DbEntry
-		if err := rows.Scan(&entry.Timestamp, &entry.Type, &entry.Value, &entry.Key, &entry.Grouping, &entry.SortingIndex); err != nil {
+		if err := rows.Scan(&entry.Type, &entry.Value, &entry.Key, &entry.Grouping, &entry.SortingIndex); err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)
@@ -471,7 +445,7 @@ type Store[T any] struct {
 	entryType          string
 	serialize          func(T) ([]byte, error)
 	deserialize        func([]byte) (T, error)
-	deriveSortingIndex func(T) *int64
+	deriveSortingIndex func(T) int64
 }
 
 func (store *Store[T]) Get(key string) (T, error) {
@@ -500,10 +474,9 @@ func (store *Store[T]) BulkGet(keys []string) (map[string]T, error) {
 }
 
 type StoreEntryInput[T any] struct {
-	Key       string
-	Value     T
-	Grouping  string
-	Timestamp *int64 // Optional: if provided, will be used instead of current time
+	Key      string
+	Value    T
+	Grouping string
 }
 
 func (store *Store[T]) Upsert(entry StoreEntryInput[T]) error {
@@ -512,9 +485,11 @@ func (store *Store[T]) Upsert(entry StoreEntryInput[T]) error {
 		return err
 	}
 
-	var sortingIndex *int64
+	var sortingIndex int64
 	if store.deriveSortingIndex != nil {
 		sortingIndex = store.deriveSortingIndex(entry.Value)
+	} else {
+		sortingIndex = time.Now().UnixMilli()
 	}
 
 	return store.db.Upsert(EntryInput{
@@ -523,7 +498,6 @@ func (store *Store[T]) Upsert(entry StoreEntryInput[T]) error {
 		Value:        serialized,
 		Grouping:     entry.Grouping,
 		SortingIndex: sortingIndex,
-		Timestamp:    entry.Timestamp,
 	})
 }
 
@@ -546,9 +520,11 @@ func (store *Store[T]) BulkUpsert(entries []StoreEntryInput[T]) error {
 		if err != nil {
 			return err
 		}
-		var sortingIndex *int64
+		var sortingIndex int64
 		if store.deriveSortingIndex != nil {
 			sortingIndex = store.deriveSortingIndex(entry.Value)
+		} else {
+			sortingIndex = time.Now().UnixMilli()
 		}
 		dbEntries = append(dbEntries, EntryInput{
 			Type:         store.entryType,
@@ -556,7 +532,6 @@ func (store *Store[T]) BulkUpsert(entries []StoreEntryInput[T]) error {
 			Value:        serialized,
 			Grouping:     entry.Grouping,
 			SortingIndex: sortingIndex,
-			Timestamp:    entry.Timestamp,
 		})
 	}
 	return store.db.BulkUpsert(dbEntries)
@@ -587,7 +562,6 @@ type StoreQueryParams struct {
 	Limit     *int
 	Offset    *int
 	Grouping  *string
-	SortField SortField
 	SortOrder SortOrder
 }
 
@@ -599,7 +573,6 @@ func (store *Store[T]) Query(params StoreQueryParams) ([]T, error) {
 		Limit:     params.Limit,
 		Offset:    params.Offset,
 		Grouping:  params.Grouping,
-		SortField: params.SortField,
 		SortOrder: params.SortOrder,
 	})
 	if err != nil {
@@ -624,7 +597,6 @@ func (store *Store[T]) QueryEntries(params StoreQueryParams) ([]DbEntry, error) 
 		Limit:     params.Limit,
 		Offset:    params.Offset,
 		Grouping:  params.Grouping,
-		SortField: params.SortField,
 		SortOrder: params.SortOrder,
 	})
 }
@@ -642,7 +614,7 @@ func MakeStore[T any](
 	entryType string,
 	serialize func(T) ([]byte, error),
 	deserialize func([]byte) (T, error),
-	deriveSortingIndex func(T) *int64) *Store[T] {
+	deriveSortingIndex func(T) int64) *Store[T] {
 	return &Store[T]{
 		db:                 db,
 		entryType:          entryType,
@@ -650,4 +622,8 @@ func MakeStore[T any](
 		deserialize:        deserialize,
 		deriveSortingIndex: deriveSortingIndex,
 	}
+}
+
+func to_ptr[T any](v T) *T {
+	return &v
 }

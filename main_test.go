@@ -465,9 +465,9 @@ func TestQueryWithSortingIndex(t *testing.T) {
 
 	entryType := "test_type"
 	err = db.BulkUpsert([]EntryInput{
-		{Type: entryType, Value: []byte("data_1"), Key: "key_1", SortingIndex: ptr(int64(2))},
-		{Type: entryType, Value: []byte("data_2"), Key: "key_2", SortingIndex: ptr(int64(1))},
-		{Type: entryType, Value: []byte("data_3"), Key: "key_3", SortingIndex: ptr(int64(3))},
+		{Type: entryType, Value: []byte("data_1"), Key: "key_1", SortingIndex: int64(2)},
+		{Type: entryType, Value: []byte("data_2"), Key: "key_2", SortingIndex: int64(1)},
+		{Type: entryType, Value: []byte("data_3"), Key: "key_3", SortingIndex: int64(3)},
 	})
 	if err != nil {
 		t.Fatalf("Failed to put entries: %v", err)
@@ -475,7 +475,6 @@ func TestQueryWithSortingIndex(t *testing.T) {
 
 	entries, err := db.Query(QueryParams{
 		Type:      &entryType,
-		SortField: SortBySortingIndex,
 		SortOrder: Ascending,
 	})
 
@@ -495,7 +494,6 @@ func TestQueryWithSortingIndex(t *testing.T) {
 
 	entriesDesc, err := db.Query(QueryParams{
 		Type:      &entryType,
-		SortField: SortBySortingIndex,
 		SortOrder: Descending,
 	})
 
@@ -669,9 +667,8 @@ func TestStoreWithSortingIndex(t *testing.T) {
 	}
 	defer db.Drop()
 
-	deriveSortingIndex := func(item testItem) *int64 {
-		si := int64(item.Value)
-		return &si
+	deriveSortingIndex := func(item testItem) int64 {
+		return int64(item.Value)
 	}
 
 	store := MakeStore(db, "sort_store", serializeTestItem, deserializeTestItem, deriveSortingIndex)
@@ -686,7 +683,6 @@ func TestStoreWithSortingIndex(t *testing.T) {
 		t.Fatalf("Failed BulkUpsert: %v", err)
 	}
 	results, err := store.Query(StoreQueryParams{
-		SortField: SortBySortingIndex,
 		SortOrder: Ascending,
 	})
 	if err != nil {
