@@ -623,7 +623,3 @@ func MakeStore[T any](
 		deriveSortingIndex: deriveSortingIndex,
 	}
 }
-
-func to_ptr[T any](v T) *T {
-	return &v
-}
