@@ -565,7 +565,7 @@ func TestStoreUpsertGetDelete(t *testing.T) {
 	}
 	defer db.Drop()
 
-	store := MakeStore(db, "test_type", serializeTestItem, deserializeTestItem, nil)
+	store := MakeStore(db, "test_type", serializeTestItem, deserializeTestItem, nil, nil)
 
 	item := testItem{Name: "one", Value: 1}
 	input := StoreEntryInput[testItem]{Key: "key_1", Value: item}
@@ -607,7 +607,7 @@ func TestStoreUpsertGetDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after delete returned error: %v", err)
 	}
-	MakeStore(db, "bulk_type", serializeTestItem, deserializeTestItem, nil)
+	MakeStore(db, "bulk_type", serializeTestItem, deserializeTestItem, nil, nil)
 
 	inputs := []StoreEntryInput[testItem]{
 		{Key: "key_a", Value: testItem{Name: "A", Value: 10}, Grouping: "g1"},
@@ -619,7 +619,7 @@ func TestStoreUpsertGetDelete(t *testing.T) {
 		t.Fatalf("Failed BulkUpsert: %v", err)
 	}
 
-	results, err := store.Query(StoreQueryParams{})
+	results, err := store.Query().Exec()
 	if err != nil {
 		t.Fatalf("Failed Query(): %v", err)
 	}
@@ -649,7 +649,7 @@ func TestStoreSerializationError(t *testing.T) {
 		return nil, fmt.Errorf("serialization failed intentionally")
 	}
 
-	store := MakeStore(db, "bad_store", badSerializer, deserializeTestItem, nil)
+	store := MakeStore(db, "bad_store", badSerializer, deserializeTestItem, nil, nil)
 	input := StoreEntryInput[testItem]{Key: "k", Value: testItem{Name: "bad"}}
 
 	err = store.Upsert(input)
@@ -671,7 +671,7 @@ func TestStoreWithSortingIndex(t *testing.T) {
 		return int64(item.Value)
 	}
 
-	store := MakeStore(db, "sort_store", serializeTestItem, deserializeTestItem, deriveSortingIndex)
+	store := MakeStore(db, "sort_store", serializeTestItem, deserializeTestItem, deriveSortingIndex, nil)
 
 	items := []StoreEntryInput[testItem]{
 		{Key: "k1", Value: testItem{Name: "Item1", Value: 30}},
@@ -682,9 +682,7 @@ func TestStoreWithSortingIndex(t *testing.T) {
 	if err := store.BulkUpsert(items); err != nil {
 		t.Fatalf("Failed BulkUpsert: %v", err)
 	}
-	results, err := store.Query(StoreQueryParams{
-		SortOrder: Ascending,
-	})
+	results, err := store.Query().SortOrder(Ascending).Exec()
 	if err != nil {
 		t.Fatalf("Failed Query(): %v", err)
 	}
@@ -696,5 +694,310 @@ func TestStoreWithSortingIndex(t *testing.T) {
 		if got.Name != expectedOrder[i] {
 			t.Errorf("At index %d, expected %s, got %s", i, expectedOrder[i], got.Name)
 		}
+	}
+}
+
+type User struct {
+	Name  string
+	Email string
+	Age   int
+}
+
+func serializeUser(u User) ([]byte, error) {
+	return json.Marshal(u)
+}
+
+func deserializeUser(data []byte) (User, error) {
+	var u User
+	err := json.Unmarshal(data, &u)
+	return u, err
+}
+
+func TestSecondaryIndexes(t *testing.T) {
+	namespace := []string{"test_namespace"}
+	name := "test_secondary_indexes"
+	db, err := Init(namespace, name)
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	// Create store with secondary indexes
+	store := MakeStore(db, "users", serializeUser, deserializeUser, nil,
+		map[string]IndexExtractor[User]{
+			"email": {
+				Extract: func(u User) interface{} { return u.Email },
+				Type:    StringIndex,
+			},
+			"age": {
+				Extract: func(u User) interface{} { return u.Age },
+				Type:    NumberIndex,
+			},
+		})
+
+	// Insert test data
+	users := []StoreEntryInput[User]{
+		{Key: "u1", Value: User{Name: "Alice", Email: "alice@example.com", Age: 30}},
+		{Key: "u2", Value: User{Name: "Bob", Email: "bob@example.com", Age: 25}},
+		{Key: "u3", Value: User{Name: "Charlie", Email: "charlie@example.com", Age: 35}},
+		{Key: "u4", Value: User{Name: "David", Email: "david@example.com", Age: 28}},
+	}
+
+	err = store.BulkUpsert(users)
+	if err != nil {
+		t.Fatalf("Failed to bulk upsert: %v", err)
+	}
+
+	// Test numeric filter: age > 28
+	results, err := store.Query().Where("age", OpGreaterThan, 28).Exec()
+	if err != nil {
+		t.Fatalf("Failed to query with age filter: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("Expected 2 results, got %d", len(results))
+	}
+	// Should get Alice (30) and Charlie (35)
+	names := make(map[string]bool)
+	for _, u := range results {
+		names[u.Name] = true
+	}
+	if !names["Alice"] || !names["Charlie"] {
+		t.Errorf("Expected Alice and Charlie, got %v", names)
+	}
+
+	// Test string filter: email = bob@example.com
+	results, err = store.Query().Where("email", OpEqual, "bob@example.com").Exec()
+	if err != nil {
+		t.Fatalf("Failed to query with email filter: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("Expected 1 result, got %d", len(results))
+	}
+	if results[0].Name != "Bob" {
+		t.Errorf("Expected Bob, got %s", results[0].Name)
+	}
+
+	// Test multiple filters: age >= 28 AND email LIKE %example.com
+	results, err = store.Query().
+		Where("age", OpGreaterThanOrEqual, 28).
+		Where("email", OpLike, "%example.com").
+		Exec()
+	if err != nil {
+		t.Fatalf("Failed to query with multiple filters: %v", err)
+	}
+	if len(results) != 3 {
+		t.Errorf("Expected 3 results, got %d", len(results))
+	}
+	// Should get Alice (30), Charlie (35), David (28)
+	names = make(map[string]bool)
+	for _, u := range results {
+		names[u.Name] = true
+	}
+	if !names["Alice"] || !names["Charlie"] || !names["David"] {
+		t.Errorf("Expected Alice, Charlie, and David, got %v", names)
+	}
+}
+
+func TestQueryBuilder(t *testing.T) {
+	namespace := []string{"test_namespace"}
+	name := "test_query_builder"
+	db, err := Init(namespace, name)
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	// Create store with indexes
+	store := MakeStore(db, "users", serializeUser, deserializeUser, nil,
+		map[string]IndexExtractor[User]{
+			"email": {
+				Extract: func(u User) interface{} { return u.Email },
+				Type:    StringIndex,
+			},
+			"age": {
+				Extract: func(u User) interface{} { return u.Age },
+				Type:    NumberIndex,
+			},
+		})
+
+	// Insert test data
+	users := []StoreEntryInput[User]{
+		{Key: "u1", Value: User{Name: "Alice", Email: "alice@example.com", Age: 30}},
+		{Key: "u2", Value: User{Name: "Bob", Email: "bob@example.com", Age: 25}},
+		{Key: "u3", Value: User{Name: "Charlie", Email: "charlie@example.com", Age: 35}},
+		{Key: "u4", Value: User{Name: "David", Email: "david@example.com", Age: 28}},
+		{Key: "u5", Value: User{Name: "Eve", Email: "eve@example.com", Age: 22}},
+	}
+
+	err = store.BulkUpsert(users)
+	if err != nil {
+		t.Fatalf("Failed to bulk upsert: %v", err)
+	}
+
+	// Test query builder with Where and Limit
+	results, err := store.Query().
+		Where("age", OpGreaterThan, 25).
+		Limit(2).
+		Exec()
+	if err != nil {
+		t.Fatalf("Failed to execute query: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("Expected 2 results with limit, got %d", len(results))
+	}
+
+	// Test query builder with multiple Where clauses
+	results, err = store.Query().
+		Where("age", OpLessThan, 30).
+		Where("age", OpGreaterThan, 23).
+		Exec()
+	if err != nil {
+		t.Fatalf("Failed to execute query with multiple filters: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("Expected 2 results (Bob 25, David 28), got %d", len(results))
+	}
+
+	// Test OrderBy ascending
+	results, err = store.Query().
+		Where("age", OpGreaterThanOrEqual, 25).
+		SortOrder(Ascending).
+		Exec()
+	if err != nil {
+		t.Fatalf("Failed to execute query with ordering: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("Expected at least 2 results, got %d", len(results))
+	}
+	// Should be ordered by sortingIndex ascending (which defaults to 0 for all since we removed timestamp)
+	// So order is not guaranteed by sortingIndex, but the query should work
+
+	// Test Offset
+	results, err = store.Query().
+		Offset(2).
+		Limit(2).
+		Exec()
+	if err != nil {
+		t.Fatalf("Failed to execute query with offset: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("Expected 2 results with offset and limit, got %d", len(results))
+	}
+}
+
+func TestIndexUpdate(t *testing.T) {
+	namespace := []string{"test_namespace"}
+	name := "test_index_update"
+	db, err := Init(namespace, name)
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	store := MakeStore(db, "users", serializeUser, deserializeUser, nil,
+		map[string]IndexExtractor[User]{
+			"age": {
+				Extract: func(u User) interface{} { return u.Age },
+				Type:    NumberIndex,
+			},
+		})
+
+	// Insert user
+	err = store.Upsert(StoreEntryInput[User]{
+		Key:   "u1",
+		Value: User{Name: "Alice", Email: "alice@example.com", Age: 30},
+	})
+	if err != nil {
+		t.Fatalf("Failed to upsert: %v", err)
+	}
+
+	// Query by age
+	results, err := store.Query().Where("age", OpEqual, 30).Exec()
+	if err != nil {
+		t.Fatalf("Failed to query: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(results))
+	}
+
+	// Update user age
+	err = store.Upsert(StoreEntryInput[User]{
+		Key:   "u1",
+		Value: User{Name: "Alice", Email: "alice@example.com", Age: 35},
+	})
+	if err != nil {
+		t.Fatalf("Failed to update: %v", err)
+	}
+
+	// Old age query should return nothing
+	results, err = store.Query().Where("age", OpEqual, 30).Exec()
+	if err != nil {
+		t.Fatalf("Failed to query after update: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("Expected 0 results for old age, got %d", len(results))
+	}
+
+	// New age query should return the user
+	results, err = store.Query().Where("age", OpEqual, 35).Exec()
+	if err != nil {
+		t.Fatalf("Failed to query for new age: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("Expected 1 result for new age, got %d", len(results))
+	}
+	if results[0].Age != 35 {
+		t.Errorf("Expected age 35, got %d", results[0].Age)
+	}
+}
+
+func TestIndexDelete(t *testing.T) {
+	namespace := []string{"test_namespace"}
+	name := "test_index_delete"
+	db, err := Init(namespace, name)
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	store := MakeStore(db, "users", serializeUser, deserializeUser, nil,
+		map[string]IndexExtractor[User]{
+			"email": {
+				Extract: func(u User) interface{} { return u.Email },
+				Type:    StringIndex,
+			},
+		})
+
+	// Insert user
+	err = store.Upsert(StoreEntryInput[User]{
+		Key:   "u1",
+		Value: User{Name: "Alice", Email: "alice@example.com", Age: 30},
+	})
+	if err != nil {
+		t.Fatalf("Failed to upsert: %v", err)
+	}
+
+	// Verify index exists
+	results, err := store.Query().Where("email", OpEqual, "alice@example.com").Exec()
+	if err != nil {
+		t.Fatalf("Failed to query: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result before delete, got %d", len(results))
+	}
+
+	// Delete user
+	err = store.Delete("u1")
+	if err != nil {
+		t.Fatalf("Failed to delete: %v", err)
+	}
+
+	// Verify index is gone (CASCADE should have deleted it)
+	results, err = store.Query().Where("email", OpEqual, "alice@example.com").Exec()
+	if err != nil {
+		t.Fatalf("Failed to query after delete: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("Expected 0 results after delete, got %d", len(results))
 	}
 }
