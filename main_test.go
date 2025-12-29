@@ -1001,3 +1001,157 @@ func TestIndexDelete(t *testing.T) {
 		t.Errorf("Expected 0 results after delete, got %d", len(results))
 	}
 }
+
+// TestNoDuplicatesWithSecondaryIndexes tests the typical SQLite issue where
+// queries with JOINs on secondary indexes can return duplicate entities
+func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
+	namespace := []string{"test_namespace"}
+	name := "test_no_duplicates"
+	db, err := Init(namespace, name)
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	// Create store with multiple indexed fields
+	store := MakeStore(db, "users", serializeUser, deserializeUser, nil,
+		map[string]IndexExtractor[User]{
+			"email": {
+				Extract: func(u User) interface{} { return u.Email },
+				Type:    StringIndex,
+			},
+			"age": {
+				Extract: func(u User) interface{} { return u.Age },
+				Type:    NumberIndex,
+			},
+		})
+
+	// Insert test data - multiple users with various attributes
+	users := []StoreEntryInput[User]{
+		{Key: "u1", Value: User{Name: "Alice", Email: "alice@example.com", Age: 30}},
+		{Key: "u2", Value: User{Name: "Bob", Email: "bob@example.com", Age: 30}},
+		{Key: "u3", Value: User{Name: "Charlie", Email: "charlie@example.com", Age: 25}},
+		{Key: "u4", Value: User{Name: "David", Email: "david@example.com", Age: 30}},
+	}
+
+	err = store.BulkUpsert(users)
+	if err != nil {
+		t.Fatalf("Failed to bulk upsert: %v", err)
+	}
+
+	// Test 1: Single filter - should not produce duplicates
+	results, err := store.Query().Where("age", OpEqual, 30).Exec()
+	if err != nil {
+		t.Fatalf("Failed to query with single filter: %v", err)
+	}
+	if len(results) != 3 {
+		t.Errorf("Test 1: Expected 3 unique results, got %d", len(results))
+	}
+	// Verify uniqueness by checking keys
+	seen := make(map[string]bool)
+	for _, u := range results {
+		if seen[u.Name] {
+			t.Errorf("Test 1: Duplicate found for user %s", u.Name)
+		}
+		seen[u.Name] = true
+	}
+
+	// Test 2: Multiple filters on same entry - critical test for duplicates
+	results, err = store.Query().
+		Where("age", OpEqual, 30).
+		Where("email", OpLike, "%example.com").
+		Exec()
+	if err != nil {
+		t.Fatalf("Failed to query with multiple filters: %v", err)
+	}
+	if len(results) != 3 {
+		t.Errorf("Test 2: Expected 3 unique results with multiple filters, got %d", len(results))
+	}
+	// Verify uniqueness
+	seen = make(map[string]bool)
+	for _, u := range results {
+		if seen[u.Name] {
+			t.Errorf("Test 2: Duplicate found for user %s", u.Name)
+		}
+		seen[u.Name] = true
+	}
+
+	// Test 3: Multiple filters with LIMIT - duplicates could cause wrong results
+	results, err = store.Query().
+		Where("age", OpGreaterThanOrEqual, 25).
+		Where("email", OpLike, "%example.com").
+		Limit(2).
+		Exec()
+	if err != nil {
+		t.Fatalf("Failed to query with filters and limit: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("Test 3: Expected exactly 2 results with LIMIT, got %d", len(results))
+	}
+	// Verify uniqueness
+	seen = make(map[string]bool)
+	for _, u := range results {
+		if seen[u.Name] {
+			t.Errorf("Test 3: Duplicate found for user %s with LIMIT", u.Name)
+		}
+		seen[u.Name] = true
+	}
+
+	// Test 4: Filters with OFFSET - duplicates could cause skipped/repeated results
+	results, err = store.Query().
+		Where("age", OpGreaterThanOrEqual, 25).
+		Offset(1).
+		Limit(2).
+		Exec()
+	if err != nil {
+		t.Fatalf("Failed to query with filters, offset and limit: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("Test 4: Expected exactly 2 results with OFFSET and LIMIT, got %d", len(results))
+	}
+	// Verify uniqueness
+	seen = make(map[string]bool)
+	for _, u := range results {
+		if seen[u.Name] {
+			t.Errorf("Test 4: Duplicate found for user %s with OFFSET", u.Name)
+		}
+		seen[u.Name] = true
+	}
+
+	// Test 5: Range query with multiple filters on the SAME field
+	// This is a critical edge case that could expose duplicate issues
+	results, err = store.Query().
+		Where("age", OpGreaterThan, 25).
+		Where("age", OpLessThanOrEqual, 30).
+		Exec()
+	if err != nil {
+		t.Fatalf("Failed to query with range filters: %v", err)
+	}
+	if len(results) != 3 {
+		t.Errorf("Test 5: Expected 3 unique results with range, got %d", len(results))
+	}
+	// Verify uniqueness - this is critical because we're JOINing the same index table twice
+	seen = make(map[string]bool)
+	for _, u := range results {
+		if seen[u.Name] {
+			t.Errorf("Test 5: CRITICAL - Duplicate found for user %s in range query on same field", u.Name)
+		}
+		seen[u.Name] = true
+	}
+	// Verify we got the right users
+	expectedNames := map[string]bool{"Alice": true, "Bob": true, "David": true}
+	for _, u := range results {
+		if !expectedNames[u.Name] {
+			t.Errorf("Test 5: Unexpected user %s in range 25 < age <= 30", u.Name)
+		}
+	}
+
+	// Test 6: Count total to ensure no extra rows
+	allResults, err := store.Query().Exec()
+	if err != nil {
+		t.Fatalf("Failed to query all: %v", err)
+	}
+	if len(allResults) != 4 {
+		t.Errorf("Test 6: Expected 4 total users, got %d", len(allResults))
+	}
+}
