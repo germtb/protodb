@@ -104,6 +104,15 @@ func Init(namespace []string, name string) (*Database, error) {
 	return database, nil
 }
 
+// DatabaseExists checks if a database file exists without creating it
+func DatabaseExists(namespace []string, name string) bool {
+	dirPath := path.Join(append([]string{RootPath()}, namespace...)...)
+	dbPath := path.Join(dirPath, name+".db")
+
+	_, err := os.Stat(dbPath)
+	return err == nil
+}
+
 func (db *Database) Close() error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
