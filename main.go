@@ -51,7 +51,13 @@ func RootPath() string {
 var ErrNoDbConnection = errors.New("no database connection")
 
 func Init(namespace []string, name string) (*Database, error) {
-	dirPath := path.Join(append([]string{RootPath()}, namespace...)...)
+	return InitWithRoot(RootPath(), namespace, name)
+}
+
+// InitWithRoot creates or opens a database at a custom root location.
+// Use Init for the default ~/.sidb location.
+func InitWithRoot(root string, namespace []string, name string) (*Database, error) {
+	dirPath := path.Join(append([]string{root}, namespace...)...)
 	dbPath := path.Join(dirPath, name+".db")
 
 	// Ensure parent directory exists
@@ -106,7 +112,12 @@ func Init(namespace []string, name string) (*Database, error) {
 
 // DatabaseExists checks if a database file exists without creating it
 func DatabaseExists(namespace []string, name string) bool {
-	dirPath := path.Join(append([]string{RootPath()}, namespace...)...)
+	return DatabaseExistsWithRoot(RootPath(), namespace, name)
+}
+
+// DatabaseExistsWithRoot checks if a database file exists at a custom root location
+func DatabaseExistsWithRoot(root string, namespace []string, name string) bool {
+	dirPath := path.Join(append([]string{root}, namespace...)...)
 	dbPath := path.Join(dirPath, name+".db")
 
 	_, err := os.Stat(dbPath)
