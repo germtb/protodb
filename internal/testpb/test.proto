@@ -1,0 +1,14 @@
+syntax = "proto3";
+package testpb;
+option go_package = "github.com/germtb/protodb/internal/testpb";
+
+message TestItem {
+  string name  = 1;
+  int32  value = 2;
+}
+
+message TestUser {
+  string name  = 1;
+  string email = 2;
+  int32  age   = 3;
+}

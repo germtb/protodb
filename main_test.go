@@ -1,31 +1,28 @@
-package sidb
+package protodb
 
 import (
-	"encoding/json"
 	"fmt"
-	"path"
+	"path/filepath"
+	"sync"
 	"testing"
+
+	"github.com/germtb/protodb/internal/testpb"
 )
 
 func TestInit(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Init(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer db.Drop()
-	expectedDir := path.Join(append([]string{RootPath()}, namespace...)...)
-	expectedPath := path.Join(expectedDir, name+".db")
-	if db.Path != expectedPath {
-		t.Errorf("Expected database path %s, got %s", expectedPath, db.Path)
+	if db.Path != dbPath {
+		t.Errorf("Expected database path %s, got %s", dbPath, db.Path)
 	}
 }
 
 func TestBulkPut(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -56,9 +53,7 @@ func TestBulkPut(t *testing.T) {
 }
 
 func TestGet(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -88,9 +83,7 @@ func TestGet(t *testing.T) {
 }
 
 func TestUpsert(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -139,18 +132,10 @@ func TestUpsert(t *testing.T) {
 	if entry.Type != entryType {
 		t.Errorf("Expected entry type %s after update, got %s", entryType, entry.Type)
 	}
-	if string(entry.Value) != "updated_data" {
-		t.Errorf("Expected entry data %s after update, got %s", "updated_data", string(entry.Value))
-	}
-	if string(entry.Value) != "updated_data" {
-		t.Errorf("Expected updated entry data %s, got %s", "updated_data", string(entry.Value))
-	}
 }
 
 func TestDelete(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -180,9 +165,7 @@ func TestDelete(t *testing.T) {
 }
 
 func TestBulkDelete(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -219,9 +202,7 @@ func TestBulkDelete(t *testing.T) {
 }
 
 func TestQuery(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -277,9 +258,7 @@ func TestQuery(t *testing.T) {
 }
 
 func TestQueryWithLimitOffset(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -319,43 +298,8 @@ func TestQueryWithLimitOffset(t *testing.T) {
 	}
 }
 
-func TestUpdate(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
-	if err != nil {
-		t.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer db.Drop()
-
-	entryType := "test_type"
-	data := []byte("test_data")
-	key := "test_key"
-	err = db.Upsert(EntryInput{Type: entryType, Value: data, Key: key, Grouping: ""})
-	if err != nil {
-		t.Fatalf("Failed to put entry: %v", err)
-	}
-
-	newData := []byte("updated_data")
-	err = db.Update(EntryInput{Type: entryType, Value: newData, Key: key, Grouping: ""})
-	if err != nil {
-		t.Fatalf("Failed to update entry: %v", err)
-	}
-
-	entry, err := db.Get(entryType, key)
-	if err != nil {
-		t.Fatalf("Failed to get entry: %v", err)
-	}
-
-	if string(entry.Value) != string(newData) {
-		t.Errorf("Expected entry data %s, got %s", string(newData), string(entry.Value))
-	}
-}
-
 func TestClose(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -373,9 +317,7 @@ func TestClose(t *testing.T) {
 }
 
 func TestGetByGrouping(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -414,9 +356,7 @@ func TestGetByGrouping(t *testing.T) {
 }
 
 func TestDeleteByGrouping(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -455,9 +395,7 @@ func ptr[T any](v T) *T {
 }
 
 func TestQueryWithSortingIndex(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -513,9 +451,7 @@ func TestQueryWithSortingIndex(t *testing.T) {
 }
 
 func TestCount(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -541,34 +477,17 @@ func TestCount(t *testing.T) {
 	}
 }
 
-type testItem struct {
-	Name  string
-	Value int
-}
-
-func serializeTestItem(item testItem) ([]byte, error) {
-	return json.Marshal(item)
-}
-
-func deserializeTestItem(data []byte) (testItem, error) {
-	var item testItem
-	err := json.Unmarshal(data, &item)
-	return item, err
-}
-
 func TestStoreUpsertGetDelete(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_store_db"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
 	}
 	defer db.Drop()
 
-	store := MakeStore(db, "test_type", serializeTestItem, deserializeTestItem, nil, nil)
+	store := MakeStore[*testpb.TestItem](db, nil)
 
-	item := testItem{Name: "one", Value: 1}
-	input := StoreEntryInput[testItem]{Key: "key_1", Value: item}
+	item := &testpb.TestItem{Name: "one", Value: 1}
+	input := StoreEntryInput[*testpb.TestItem]{Key: "key_1", Value: item}
 
 	// --- Upsert ---
 	if err := store.Upsert(input); err != nil {
@@ -580,20 +499,26 @@ func TestStoreUpsertGetDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get: %v", err)
 	}
+	if got == nil {
+		t.Fatalf("Expected non-nil result from Get")
+	}
 	if got.Name != item.Name || got.Value != item.Value {
 		t.Errorf("Expected %+v, got %+v", item, got)
 	}
 
 	// --- Update ---
-	item.Value = 99
-	input.Value = item
-	if err := store.Upsert(input); err != nil {
+	item2 := &testpb.TestItem{Name: "one", Value: 99}
+	input2 := StoreEntryInput[*testpb.TestItem]{Key: "key_1", Value: item2}
+	if err := store.Upsert(input2); err != nil {
 		t.Fatalf("Failed to update: %v", err)
 	}
 
 	got, err = store.Get("key_1")
 	if err != nil {
 		t.Fatalf("Failed to get after update: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Expected non-nil result after update")
 	}
 	if got.Value != 99 {
 		t.Errorf("Expected updated Value=99, got %d", got.Value)
@@ -607,12 +532,15 @@ func TestStoreUpsertGetDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after delete returned error: %v", err)
 	}
-	MakeStore(db, "bulk_type", serializeTestItem, deserializeTestItem, nil, nil)
+	if got != nil {
+		t.Errorf("Expected nil after delete, got %+v", got)
+	}
 
-	inputs := []StoreEntryInput[testItem]{
-		{Key: "key_a", Value: testItem{Name: "A", Value: 10}, Grouping: "g1"},
-		{Key: "key_b", Value: testItem{Name: "B", Value: 20}, Grouping: "g1"},
-		{Key: "key_c", Value: testItem{Name: "C", Value: 30}, Grouping: "g2"},
+	// --- BulkUpsert + Query ---
+	inputs := []StoreEntryInput[*testpb.TestItem]{
+		{Key: "key_a", Value: &testpb.TestItem{Name: "A", Value: 10}, Grouping: "g1"},
+		{Key: "key_b", Value: &testpb.TestItem{Name: "B", Value: 20}, Grouping: "g1"},
+		{Key: "key_c", Value: &testpb.TestItem{Name: "C", Value: 30}, Grouping: "g2"},
 	}
 
 	if err := store.BulkUpsert(inputs); err != nil {
@@ -628,7 +556,7 @@ func TestStoreUpsertGetDelete(t *testing.T) {
 		t.Fatalf("Expected %d items, got %d", len(inputs), len(results))
 	}
 
-	expected := map[string]int{"A": 10, "B": 20, "C": 30}
+	expected := map[string]int32{"A": 10, "B": 20, "C": 30}
 	for _, got := range results {
 		if expected[got.Name] != got.Value {
 			t.Errorf("Unexpected value for %s: %d", got.Name, got.Value)
@@ -636,47 +564,38 @@ func TestStoreUpsertGetDelete(t *testing.T) {
 	}
 }
 
-func TestStoreSerializationError(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_store_error"
-	db, err := Init(namespace, name)
+func TestStoreGetNotFound(t *testing.T) {
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
 	}
 	defer db.Drop()
 
-	badSerializer := func(_ testItem) ([]byte, error) {
-		return nil, fmt.Errorf("serialization failed intentionally")
+	store := MakeStore[*testpb.TestItem](db, nil)
+	got, err := store.Get("nonexistent")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
 	}
-
-	store := MakeStore(db, "bad_store", badSerializer, deserializeTestItem, nil, nil)
-	input := StoreEntryInput[testItem]{Key: "k", Value: testItem{Name: "bad"}}
-
-	err = store.Upsert(input)
-	if err == nil {
-		t.Fatalf("Expected serialization error, got nil")
+	if got != nil {
+		t.Errorf("Expected nil for nonexistent key, got %+v", got)
 	}
 }
 
 func TestStoreWithSortingIndex(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_store_sorting"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
 	}
 	defer db.Drop()
 
-	deriveSortingIndex := func(item testItem) int64 {
+	store := MakeStore(db, func(item *testpb.TestItem) int64 {
 		return int64(item.Value)
-	}
+	})
 
-	store := MakeStore(db, "sort_store", serializeTestItem, deserializeTestItem, deriveSortingIndex, nil)
-
-	items := []StoreEntryInput[testItem]{
-		{Key: "k1", Value: testItem{Name: "Item1", Value: 30}},
-		{Key: "k2", Value: testItem{Name: "Item2", Value: 10}},
-		{Key: "k3", Value: testItem{Name: "Item3", Value: 20}},
+	items := []StoreEntryInput[*testpb.TestItem]{
+		{Key: "k1", Value: &testpb.TestItem{Name: "Item1", Value: 30}},
+		{Key: "k2", Value: &testpb.TestItem{Name: "Item2", Value: 10}},
+		{Key: "k3", Value: &testpb.TestItem{Name: "Item3", Value: 20}},
 	}
 
 	if err := store.BulkUpsert(items); err != nil {
@@ -697,50 +616,20 @@ func TestStoreWithSortingIndex(t *testing.T) {
 	}
 }
 
-type User struct {
-	Name  string
-	Email string
-	Age   int
-}
-
-func serializeUser(u User) ([]byte, error) {
-	return json.Marshal(u)
-}
-
-func deserializeUser(data []byte) (User, error) {
-	var u User
-	err := json.Unmarshal(data, &u)
-	return u, err
-}
-
 func TestSecondaryIndexes(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_secondary_indexes"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
 	}
 	defer db.Drop()
 
-	// Create store with secondary indexes
-	store := MakeStore(db, "users", serializeUser, deserializeUser, nil,
-		map[string]IndexExtractor[User]{
-			"email": {
-				Extract: func(u User) interface{} { return u.Email },
-				Type:    StringIndex,
-			},
-			"age": {
-				Extract: func(u User) interface{} { return u.Age },
-				Type:    NumberIndex,
-			},
-		})
+	store := MakeStore[*testpb.TestUser](db, nil, "email", "age")
 
-	// Insert test data
-	users := []StoreEntryInput[User]{
-		{Key: "u1", Value: User{Name: "Alice", Email: "alice@example.com", Age: 30}},
-		{Key: "u2", Value: User{Name: "Bob", Email: "bob@example.com", Age: 25}},
-		{Key: "u3", Value: User{Name: "Charlie", Email: "charlie@example.com", Age: 35}},
-		{Key: "u4", Value: User{Name: "David", Email: "david@example.com", Age: 28}},
+	users := []StoreEntryInput[*testpb.TestUser]{
+		{Key: "u1", Value: &testpb.TestUser{Name: "Alice", Email: "alice@example.com", Age: 30}},
+		{Key: "u2", Value: &testpb.TestUser{Name: "Bob", Email: "bob@example.com", Age: 25}},
+		{Key: "u3", Value: &testpb.TestUser{Name: "Charlie", Email: "charlie@example.com", Age: 35}},
+		{Key: "u4", Value: &testpb.TestUser{Name: "David", Email: "david@example.com", Age: 28}},
 	}
 
 	err = store.BulkUpsert(users)
@@ -756,7 +645,6 @@ func TestSecondaryIndexes(t *testing.T) {
 	if len(results) != 2 {
 		t.Errorf("Expected 2 results, got %d", len(results))
 	}
-	// Should get Alice (30) and Charlie (35)
 	names := make(map[string]bool)
 	for _, u := range results {
 		names[u.Name] = true
@@ -788,7 +676,6 @@ func TestSecondaryIndexes(t *testing.T) {
 	if len(results) != 3 {
 		t.Errorf("Expected 3 results, got %d", len(results))
 	}
-	// Should get Alice (30), Charlie (35), David (28)
 	names = make(map[string]bool)
 	for _, u := range results {
 		names[u.Name] = true
@@ -799,34 +686,20 @@ func TestSecondaryIndexes(t *testing.T) {
 }
 
 func TestQueryBuilder(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_query_builder"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
 	}
 	defer db.Drop()
 
-	// Create store with indexes
-	store := MakeStore(db, "users", serializeUser, deserializeUser, nil,
-		map[string]IndexExtractor[User]{
-			"email": {
-				Extract: func(u User) interface{} { return u.Email },
-				Type:    StringIndex,
-			},
-			"age": {
-				Extract: func(u User) interface{} { return u.Age },
-				Type:    NumberIndex,
-			},
-		})
+	store := MakeStore[*testpb.TestUser](db, nil, "email", "age")
 
-	// Insert test data
-	users := []StoreEntryInput[User]{
-		{Key: "u1", Value: User{Name: "Alice", Email: "alice@example.com", Age: 30}},
-		{Key: "u2", Value: User{Name: "Bob", Email: "bob@example.com", Age: 25}},
-		{Key: "u3", Value: User{Name: "Charlie", Email: "charlie@example.com", Age: 35}},
-		{Key: "u4", Value: User{Name: "David", Email: "david@example.com", Age: 28}},
-		{Key: "u5", Value: User{Name: "Eve", Email: "eve@example.com", Age: 22}},
+	users := []StoreEntryInput[*testpb.TestUser]{
+		{Key: "u1", Value: &testpb.TestUser{Name: "Alice", Email: "alice@example.com", Age: 30}},
+		{Key: "u2", Value: &testpb.TestUser{Name: "Bob", Email: "bob@example.com", Age: 25}},
+		{Key: "u3", Value: &testpb.TestUser{Name: "Charlie", Email: "charlie@example.com", Age: 35}},
+		{Key: "u4", Value: &testpb.TestUser{Name: "David", Email: "david@example.com", Age: 28}},
+		{Key: "u5", Value: &testpb.TestUser{Name: "Eve", Email: "eve@example.com", Age: 22}},
 	}
 
 	err = store.BulkUpsert(users)
@@ -869,8 +742,6 @@ func TestQueryBuilder(t *testing.T) {
 	if len(results) < 2 {
 		t.Fatalf("Expected at least 2 results, got %d", len(results))
 	}
-	// Should be ordered by sortingIndex ascending (which defaults to 0 for all since we removed timestamp)
-	// So order is not guaranteed by sortingIndex, but the query should work
 
 	// Test Offset
 	results, err = store.Query().
@@ -886,26 +757,18 @@ func TestQueryBuilder(t *testing.T) {
 }
 
 func TestIndexUpdate(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_index_update"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
 	}
 	defer db.Drop()
 
-	store := MakeStore(db, "users", serializeUser, deserializeUser, nil,
-		map[string]IndexExtractor[User]{
-			"age": {
-				Extract: func(u User) interface{} { return u.Age },
-				Type:    NumberIndex,
-			},
-		})
+	store := MakeStore[*testpb.TestUser](db, nil, "age")
 
 	// Insert user
-	err = store.Upsert(StoreEntryInput[User]{
+	err = store.Upsert(StoreEntryInput[*testpb.TestUser]{
 		Key:   "u1",
-		Value: User{Name: "Alice", Email: "alice@example.com", Age: 30},
+		Value: &testpb.TestUser{Name: "Alice", Email: "alice@example.com", Age: 30},
 	})
 	if err != nil {
 		t.Fatalf("Failed to upsert: %v", err)
@@ -921,9 +784,9 @@ func TestIndexUpdate(t *testing.T) {
 	}
 
 	// Update user age
-	err = store.Upsert(StoreEntryInput[User]{
+	err = store.Upsert(StoreEntryInput[*testpb.TestUser]{
 		Key:   "u1",
-		Value: User{Name: "Alice", Email: "alice@example.com", Age: 35},
+		Value: &testpb.TestUser{Name: "Alice", Email: "alice@example.com", Age: 35},
 	})
 	if err != nil {
 		t.Fatalf("Failed to update: %v", err)
@@ -952,26 +815,18 @@ func TestIndexUpdate(t *testing.T) {
 }
 
 func TestIndexDelete(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_index_delete"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
 	}
 	defer db.Drop()
 
-	store := MakeStore(db, "users", serializeUser, deserializeUser, nil,
-		map[string]IndexExtractor[User]{
-			"email": {
-				Extract: func(u User) interface{} { return u.Email },
-				Type:    StringIndex,
-			},
-		})
+	store := MakeStore[*testpb.TestUser](db, nil, "email")
 
 	// Insert user
-	err = store.Upsert(StoreEntryInput[User]{
+	err = store.Upsert(StoreEntryInput[*testpb.TestUser]{
 		Key:   "u1",
-		Value: User{Name: "Alice", Email: "alice@example.com", Age: 30},
+		Value: &testpb.TestUser{Name: "Alice", Email: "alice@example.com", Age: 30},
 	})
 	if err != nil {
 		t.Fatalf("Failed to upsert: %v", err)
@@ -1005,33 +860,19 @@ func TestIndexDelete(t *testing.T) {
 // TestNoDuplicatesWithSecondaryIndexes tests the typical SQLite issue where
 // queries with JOINs on secondary indexes can return duplicate entities
 func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
-	namespace := []string{"test_namespace"}
-	name := "test_no_duplicates"
-	db, err := Init(namespace, name)
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
 	}
 	defer db.Drop()
 
-	// Create store with multiple indexed fields
-	store := MakeStore(db, "users", serializeUser, deserializeUser, nil,
-		map[string]IndexExtractor[User]{
-			"email": {
-				Extract: func(u User) interface{} { return u.Email },
-				Type:    StringIndex,
-			},
-			"age": {
-				Extract: func(u User) interface{} { return u.Age },
-				Type:    NumberIndex,
-			},
-		})
+	store := MakeStore[*testpb.TestUser](db, nil, "email", "age")
 
-	// Insert test data - multiple users with various attributes
-	users := []StoreEntryInput[User]{
-		{Key: "u1", Value: User{Name: "Alice", Email: "alice@example.com", Age: 30}},
-		{Key: "u2", Value: User{Name: "Bob", Email: "bob@example.com", Age: 30}},
-		{Key: "u3", Value: User{Name: "Charlie", Email: "charlie@example.com", Age: 25}},
-		{Key: "u4", Value: User{Name: "David", Email: "david@example.com", Age: 30}},
+	users := []StoreEntryInput[*testpb.TestUser]{
+		{Key: "u1", Value: &testpb.TestUser{Name: "Alice", Email: "alice@example.com", Age: 30}},
+		{Key: "u2", Value: &testpb.TestUser{Name: "Bob", Email: "bob@example.com", Age: 30}},
+		{Key: "u3", Value: &testpb.TestUser{Name: "Charlie", Email: "charlie@example.com", Age: 25}},
+		{Key: "u4", Value: &testpb.TestUser{Name: "David", Email: "david@example.com", Age: 30}},
 	}
 
 	err = store.BulkUpsert(users)
@@ -1047,7 +888,6 @@ func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
 	if len(results) != 3 {
 		t.Errorf("Test 1: Expected 3 unique results, got %d", len(results))
 	}
-	// Verify uniqueness by checking keys
 	seen := make(map[string]bool)
 	for _, u := range results {
 		if seen[u.Name] {
@@ -1067,7 +907,6 @@ func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
 	if len(results) != 3 {
 		t.Errorf("Test 2: Expected 3 unique results with multiple filters, got %d", len(results))
 	}
-	// Verify uniqueness
 	seen = make(map[string]bool)
 	for _, u := range results {
 		if seen[u.Name] {
@@ -1076,7 +915,7 @@ func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
 		seen[u.Name] = true
 	}
 
-	// Test 3: Multiple filters with LIMIT - duplicates could cause wrong results
+	// Test 3: Multiple filters with LIMIT
 	results, err = store.Query().
 		Where("age", OpGreaterThanOrEqual, 25).
 		Where("email", OpLike, "%example.com").
@@ -1088,7 +927,6 @@ func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
 	if len(results) != 2 {
 		t.Errorf("Test 3: Expected exactly 2 results with LIMIT, got %d", len(results))
 	}
-	// Verify uniqueness
 	seen = make(map[string]bool)
 	for _, u := range results {
 		if seen[u.Name] {
@@ -1097,7 +935,7 @@ func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
 		seen[u.Name] = true
 	}
 
-	// Test 4: Filters with OFFSET - duplicates could cause skipped/repeated results
+	// Test 4: Filters with OFFSET
 	results, err = store.Query().
 		Where("age", OpGreaterThanOrEqual, 25).
 		Offset(1).
@@ -1109,7 +947,6 @@ func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
 	if len(results) != 2 {
 		t.Errorf("Test 4: Expected exactly 2 results with OFFSET and LIMIT, got %d", len(results))
 	}
-	// Verify uniqueness
 	seen = make(map[string]bool)
 	for _, u := range results {
 		if seen[u.Name] {
@@ -1119,7 +956,6 @@ func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
 	}
 
 	// Test 5: Range query with multiple filters on the SAME field
-	// This is a critical edge case that could expose duplicate issues
 	results, err = store.Query().
 		Where("age", OpGreaterThan, 25).
 		Where("age", OpLessThanOrEqual, 30).
@@ -1130,7 +966,6 @@ func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
 	if len(results) != 3 {
 		t.Errorf("Test 5: Expected 3 unique results with range, got %d", len(results))
 	}
-	// Verify uniqueness - this is critical because we're JOINing the same index table twice
 	seen = make(map[string]bool)
 	for _, u := range results {
 		if seen[u.Name] {
@@ -1138,7 +973,6 @@ func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
 		}
 		seen[u.Name] = true
 	}
-	// Verify we got the right users
 	expectedNames := map[string]bool{"Alice": true, "Bob": true, "David": true}
 	for _, u := range results {
 		if !expectedNames[u.Name] {
@@ -1153,5 +987,308 @@ func TestNoDuplicatesWithSecondaryIndexes(t *testing.T) {
 	}
 	if len(allResults) != 4 {
 		t.Errorf("Test 6: Expected 4 total users, got %d", len(allResults))
+	}
+}
+
+func TestInitNonexistentDirectory(t *testing.T) {
+	db, err := Init("/nonexistent/path/test.db")
+	if err == nil {
+		db.Close()
+		t.Fatal("Expected error when opening database in nonexistent directory, got nil")
+	}
+}
+
+func TestUpsertReplacesExistingKey(t *testing.T) {
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	entryType := "test_type"
+	err = db.Upsert(EntryInput{Type: entryType, Key: "k1", Value: []byte("first")})
+	if err != nil {
+		t.Fatalf("Failed to upsert: %v", err)
+	}
+
+	err = db.Upsert(EntryInput{Type: entryType, Key: "k1", Value: []byte("second")})
+	if err != nil {
+		t.Fatalf("Failed to upsert duplicate key: %v", err)
+	}
+
+	entry, err := db.Get(entryType, "k1")
+	if err != nil {
+		t.Fatalf("Failed to get: %v", err)
+	}
+	if string(entry.Value) != "second" {
+		t.Errorf("Expected value 'second' after replace, got '%s'", string(entry.Value))
+	}
+
+	count, err := db.Count()
+	if err != nil {
+		t.Fatalf("Failed to count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Expected 1 entry after duplicate upsert, got %d", count)
+	}
+}
+
+func TestGetNonexistentKey(t *testing.T) {
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	entry, err := db.Get("test_type", "nonexistent")
+	if err != nil {
+		t.Fatalf("Get returned error for nonexistent key: %v", err)
+	}
+	if entry != nil {
+		t.Errorf("Expected nil for nonexistent key, got %+v", entry)
+	}
+}
+
+func TestOperationsAfterClose(t *testing.T) {
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+
+	db.Close()
+
+	if err := db.Upsert(EntryInput{Type: "t", Key: "k", Value: []byte("v")}); err == nil {
+		t.Error("Expected error on Upsert after Close")
+	}
+	if _, err := db.Get("t", "k"); err == nil {
+		t.Error("Expected error on Get after Close")
+	}
+	if err := db.Delete("t", "k"); err == nil {
+		t.Error("Expected error on Delete after Close")
+	}
+}
+
+func TestDeleteNonexistentKey(t *testing.T) {
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	// Deleting a key that doesn't exist should not error
+	err = db.Delete("test_type", "nonexistent")
+	if err != nil {
+		t.Errorf("Expected no error deleting nonexistent key, got %v", err)
+	}
+}
+
+func TestDatabaseExists(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	if DatabaseExists(dbPath) {
+		t.Error("Expected DatabaseExists to return false before Init")
+	}
+
+	db, err := Init(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+
+	if !DatabaseExists(dbPath) {
+		t.Error("Expected DatabaseExists to return true after Init")
+	}
+
+	db.Drop()
+
+	if DatabaseExists(dbPath) {
+		t.Error("Expected DatabaseExists to return false after Drop")
+	}
+}
+
+func TestConcurrentAccess(t *testing.T) {
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	store := MakeStore[*testpb.TestItem](db, nil)
+
+	const numWriters = 10
+	const numReaders = 10
+	const opsPerGoroutine = 50
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, (numWriters+numReaders)*opsPerGoroutine)
+
+	// Writers
+	for w := 0; w < numWriters; w++ {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			for i := 0; i < opsPerGoroutine; i++ {
+				key := fmt.Sprintf("w%d-k%d", writerID, i)
+				err := store.Upsert(StoreEntryInput[*testpb.TestItem]{
+					Key:   key,
+					Value: &testpb.TestItem{Name: key, Value: int32(i)},
+				})
+				if err != nil {
+					errCh <- fmt.Errorf("writer %d op %d: %w", writerID, i, err)
+					return
+				}
+			}
+		}(w)
+	}
+
+	// Readers
+	for r := 0; r < numReaders; r++ {
+		wg.Add(1)
+		go func(readerID int) {
+			defer wg.Done()
+			for i := 0; i < opsPerGoroutine; i++ {
+				_, err := store.Query().Exec()
+				if err != nil {
+					errCh <- fmt.Errorf("reader %d op %d: %w", readerID, i, err)
+					return
+				}
+			}
+		}(r)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Errorf("Concurrent error: %v", err)
+	}
+
+	count, err := store.Count()
+	if err != nil {
+		t.Fatalf("Failed to count: %v", err)
+	}
+	expected := int64(numWriters * opsPerGoroutine)
+	if count != expected {
+		t.Errorf("Expected %d entries, got %d", expected, count)
+	}
+}
+
+func TestStoreBulkGet(t *testing.T) {
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	store := MakeStore[*testpb.TestItem](db, nil)
+
+	// Insert some items
+	items := []StoreEntryInput[*testpb.TestItem]{
+		{Key: "k1", Value: &testpb.TestItem{Name: "Item1", Value: 10}},
+		{Key: "k2", Value: &testpb.TestItem{Name: "Item2", Value: 20}},
+		{Key: "k3", Value: &testpb.TestItem{Name: "Item3", Value: 30}},
+	}
+	if err := store.BulkUpsert(items); err != nil {
+		t.Fatalf("Failed to bulk upsert: %v", err)
+	}
+
+	// BulkGet with existing keys
+	result, err := store.BulkGet([]string{"k1", "k3"})
+	if err != nil {
+		t.Fatalf("Failed BulkGet: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 results, got %d", len(result))
+	}
+	if result["k1"].Name != "Item1" {
+		t.Errorf("Expected Item1, got %s", result["k1"].Name)
+	}
+	if result["k3"].Name != "Item3" {
+		t.Errorf("Expected Item3, got %s", result["k3"].Name)
+	}
+
+	// BulkGet with some missing keys
+	result, err = store.BulkGet([]string{"k1", "missing1", "k2", "missing2"})
+	if err != nil {
+		t.Fatalf("Failed BulkGet with missing keys: %v", err)
+	}
+	if len(result) != 2 {
+		t.Errorf("Expected 2 results (missing keys ignored), got %d", len(result))
+	}
+
+	// BulkGet with empty slice
+	result, err = store.BulkGet([]string{})
+	if err != nil {
+		t.Fatalf("Failed BulkGet with empty slice: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("Expected 0 results for empty slice, got %d", len(result))
+	}
+}
+
+func TestLargeBulkOperations(t *testing.T) {
+	db, err := Init(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Drop()
+
+	store := MakeStore(db, func(item *testpb.TestItem) int64 {
+		return int64(item.Value)
+	})
+
+	const n = 600 // exceeds maxSQLPlaceholders (500)
+
+	// BulkUpsert 600 items
+	inputs := make([]StoreEntryInput[*testpb.TestItem], n)
+	for i := 0; i < n; i++ {
+		inputs[i] = StoreEntryInput[*testpb.TestItem]{
+			Key:   fmt.Sprintf("key-%04d", i),
+			Value: &testpb.TestItem{Name: fmt.Sprintf("Item%d", i), Value: int32(i)},
+		}
+	}
+	if err := store.BulkUpsert(inputs); err != nil {
+		t.Fatalf("Failed BulkUpsert of %d items: %v", n, err)
+	}
+
+	count, err := store.Count()
+	if err != nil {
+		t.Fatalf("Failed to count: %v", err)
+	}
+	if count != int64(n) {
+		t.Fatalf("Expected %d entries after BulkUpsert, got %d", n, count)
+	}
+
+	// BulkGet all 600 keys
+	keys := make([]string, n)
+	for i := 0; i < n; i++ {
+		keys[i] = fmt.Sprintf("key-%04d", i)
+	}
+	result, err := store.BulkGet(keys)
+	if err != nil {
+		t.Fatalf("Failed BulkGet of %d keys: %v", n, err)
+	}
+	if len(result) != n {
+		t.Errorf("Expected %d results from BulkGet, got %d", n, len(result))
+	}
+
+	// Verify cross-chunk boundary values (items 499 and 500)
+	if result["key-0499"].Name != "Item499" {
+		t.Errorf("Cross-chunk boundary: expected Item499, got %s", result["key-0499"].Name)
+	}
+	if result["key-0500"].Name != "Item500" {
+		t.Errorf("Cross-chunk boundary: expected Item500, got %s", result["key-0500"].Name)
+	}
+
+	// BulkDelete all 600 keys
+	if err := store.BulkDelete(keys); err != nil {
+		t.Fatalf("Failed BulkDelete of %d keys: %v", n, err)
+	}
+
+	count, err = store.Count()
+	if err != nil {
+		t.Fatalf("Failed to count after BulkDelete: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("Expected 0 entries after BulkDelete, got %d", count)
 	}
 }

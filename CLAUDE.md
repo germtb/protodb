@@ -1,224 +1,133 @@
-# CLAUDE.md - AI Assistant Guide for SIDB
+# CLAUDE.md - AI Assistant Guide for ProtoDB
 
 ## Project Overview
 
-**SIDB** (Si(mple) DB) is a lightweight, type-safe key-value database library for Go, backed by SQLite. It provides a clean abstraction layer for storing and retrieving typed data with rich querying capabilities.
+**ProtoDB** is a protobuf-native embedded key-value database for Go, backed by SQLite. It provides a clean abstraction layer for storing and retrieving protobuf messages with rich querying capabilities.
 
 **Core Value Proposition:**
 
-- Simple, intuitive API with minimal boilerplate
-- Type-safe operations through Go generics
+- Protobuf-native: stores proto.Message types with zero serialization boilerplate
+- Type-safe operations through Go generics constrained to `proto.Message`
 - Thread-safe concurrent access
-- Rich querying with filtering, sorting, and pagination
-- Zero configuration - databases auto-created in `~/.sidb/{namespace}/{name}.db`
+- Rich querying with secondary indexes, filtering, sorting, and pagination
+- Zero configuration - databases auto-created at specified root paths
 
 ## Architecture
 
 ### Core Components
 
-1. **Database** (`main.go:44-72`)
+1. **Database** (`main.go`)
 
    - Low-level SQLite wrapper with raw CRUD operations
    - Thread-safe with `sync.RWMutex` for concurrent reads
    - Manages connection lifecycle and transactions
 
-2. **Store[T]** (`main.go:283-301`)
+2. **Store[T proto.Message]** (`main.go`)
 
-   - Generic type-safe wrapper around Database
-   - Handles serialization/deserialization using `encoding/gob`
-   - Provides typed CRUD operations for any serializable Go type
+   - Generic type-safe wrapper around Database, constrained to `proto.Message`
+   - Uses `proto.Marshal`/`proto.Unmarshal` for serialization
+   - Automatic secondary index extraction via protobuf reflection (`protoreflect`)
    - Supports custom sorting index derivation via function
+   - Options pattern: `NewStore[T](db, entryType, IndexFields[T]("field1"), WithSortingIndexFunc[T](fn))`
 
-3. **Data Model**
-   - **EntryInput** (`main.go:26-33`): Input for create/update operations
-   - **DbEntry** (`main.go:35-42`): Retrieved entry with computed timestamp
-   - **Schema**: Composite key (type + key), indexed on type, grouping, sortingIndex, timestamp
+### Data Model
+
+- **EntryInput**: Input for create/update operations (Type, Key, Value, Grouping, SortingIndex)
+- **DbEntry**: Retrieved entry
+- **Schema**: Composite key (type + key), indexed on type, grouping, sortingIndex
+- **Secondary Indexes**: `entry_indexes` table with foreign key cascading deletes
 
 ### Key Design Patterns
 
 **Thread Safety:**
 
-- Read operations use `db.mu.RLock()` for concurrent reads
-- Write operations use `db.mu.Lock()` for exclusive access
+- Read operations use `db.mutex.RLock()` for concurrent reads
+- Write operations use `db.mutex.Lock()` for exclusive access
 - Always defer unlock immediately after lock
 
-**Transactions:**
+**Atomic Operations:**
 
-- Bulk operations use transactions for atomicity and performance
-- Pattern: `BEGIN -> operations -> COMMIT/ROLLBACK`
-- See `BulkUpsert`, `BulkDelete` for examples
+- `upsertWithIndexes` and `bulkUpsertWithIndexes` perform entry + index writes in a single transaction under one lock
 
-**Type Safety:**
+**Protobuf Serialization:**
 
-- Use `Store[T]` for type-safe operations on custom types
-- Generic constraints: any serializable type works with `encoding/gob`
-- Example: `Store[MyStruct]` provides `Get() (*MyStruct, error)` instead of `Get() (*DbEntry, error)`
-
-**Error Handling:**
-
-- Database errors are propagated up
-- "Not found" returns `(nil, nil)` in Soft operations
-- "Not found" returns error in regular Get operations
+- `Store[T]` requires `T` to be a `proto.Message` (always a pointer type like `*userpb.User`)
+- `proto.Marshal`/`proto.Unmarshal` for serialization
+- Secondary index values extracted via `protoreflect.FieldDescriptor` with kind-based branching
+- New instances created via `reflect.New` on the element type
 
 ## Working with the Codebase
+
+### Proto Definitions
+
+- **`internal/testpb/test.proto`**: TestItem, TestUser (test-only)
 
 ### Adding New Features
 
 **When adding database operations:**
 
-1. Add low-level method to `Database` struct
-2. Use proper locking (RLock for reads, Lock for writes)
-3. Add corresponding typed method to `Store[T]` if applicable
-4. Write comprehensive tests in `main_test.go`
-5. Consider transaction support for bulk operations
+1. Add low-level method to `Database` struct with proper locking
+2. Add corresponding typed method to `Store[T]` if applicable
+3. Write comprehensive tests in `main_test.go`
+4. Consider transaction support for bulk operations
 
-**When modifying schema:**
+**When adding new proto index types:**
 
-- Schema is defined in `initDB()` (`main.go:74-107`)
-- Indexes are critical for query performance
-- Current indexes: type, grouping, sortingIndex, timestamp
-- WITHOUT ROWID optimization requires PRIMARY KEY to be first in CREATE TABLE
+1. Add kind handling in `Store.extractIndexes()` (switch on `protoreflect.Kind`)
+2. Map to either `IndexValue.StrValue` or `IndexValue.NumValue`
 
 ### Testing Approach
 
-Tests are in `main_test.go` and use:
+Tests use temporary directories (cleaned up with `defer db.Drop()` or `t.TempDir()`):
 
-- Temporary test namespaces (cleaned up with `defer db.Drop()`)
-- Table-driven tests for comprehensive coverage
-- Real SQLite database (not mocked) for integration testing
+- **`main_test.go`**: Core functionality tests using proto types from `internal/testpb`
 
 **Test Structure Pattern:**
 
 ```go
 func TestFeature(t *testing.T) {
-    db, _ := Open("test-namespace", "test-feature")
+    root := t.TempDir()
+    db, _ := Init(root, []string{"ns"}, "test-feature")
     defer db.Drop()
     // ... test operations
 }
 ```
-
-### Common Tasks
-
-**Adding a new query filter:**
-
-1. Add field to `QueryParams` struct (`main.go:212-222`)
-2. Update `Query()` method (`main.go:347-427`) to build WHERE clause
-3. Add test case in `main_test.go`
-
-**Adding a new operation:**
-
-1. Implement on `Database` with proper locking
-2. Add generic wrapper to `Store[T]`
-3. Write tests covering edge cases
-4. Update README.md with usage example
-
-**Performance optimization:**
-
-- Check query plans with EXPLAIN QUERY PLAN
-- Consider adding indexes for new query patterns
-- Use transactions for bulk operations
-- Profile with Go's pprof if needed
-
-## Important Patterns and Conventions
-
-### Naming Conventions
-
-- **Type**: Category/table name for grouping entries (e.g., "users", "posts")
-- **Key**: Unique identifier within a type (e.g., user ID, post ID)
-- **Grouping**: Optional field for batch operations (e.g., "session-123", "batch-2024")
-- **SortingIndex**: Custom ordering field (e.g., display order, priority)
-
-### Serialization
-
-- Uses `encoding/gob` for type serialization
-- Value stored as BLOB in database
-- Custom types must be gob-compatible (exported fields, no channels/functions)
-- Register complex types with `gob.Register()` if needed
-
-### Database Location
-
-- Default: `~/.sidb/{namespace}/{name}.db`
-- Namespace provides isolation between different apps/environments
-- Example: `Open("myapp", "production")` → `~/.sidb/myapp/production.db`
-
-### Sorting Index Derivation
-
-`Store[T]` supports custom sorting via `WithSortingIndexFunc`:
-
-```go
-store := NewStoreWithSortingIndex[MyType](db, "mytype",
-    func(t *MyType) int64 {
-        return t.Priority // custom sort field
-    })
-```
-
-## Gotchas and Considerations
-
-### Thread Safety
-
-- `Database` is thread-safe, but individual operations are not transactions
-- Multiple operations requiring consistency should be wrapped in explicit transactions
-- Future consideration: Add BeginTx/CommitTx/RollbackTx methods for user transactions
-
-### Timestamps
-
-- Default: current time on upsert
-- Can override with custom timestamp for data migration/import
-- Stored as Unix timestamp (int64)
-
-### Primary Key Behavior
-
-- Composite key: (key, type)
-- UPSERT semantics: INSERT OR REPLACE
-- No automatic ID generation - caller provides keys
-
-### Performance Notes
-
-- WITHOUT ROWID optimization used for better performance
-- Bulk operations use transactions (10-100x faster than individual inserts)
-- Query with appropriate filters and indexes for best performance
-- Consider LIMIT/OFFSET for pagination on large datasets
-
-## File Reference
-
-- **main.go**: Core library implementation (Database, Store, all operations)
-- **main_test.go**: Comprehensive test suite
-- **README.md**: User-facing documentation
-- **TODO.md**: Planned features and improvements
-- **go.mod**: Module definition (`github.com/gerdooshell/sidb`)
 
 ## Quick Reference
 
 **Opening a database:**
 
 ```go
-db, err := sidb.Open("namespace", "dbname")
+db, err := protodb.Init(root, []string{"namespace"}, "dbname")
 defer db.Close()
 ```
 
-**Type-safe operations:**
+**Type-safe operations with protobuf:**
 
 ```go
-store := sidb.NewStore[MyType](db, "mytype")
-store.Upsert("key1", &myData)
-data, _ := store.Get("key1")
-```
-
-**Querying:**
-
-```go
-entries, _ := store.Query(sidb.QueryParams{
-    Type: "users",
-    GroupingFilter: &grouping,
-    SortField: sidb.SortByTimestamp,
-    SortOrder: sidb.Descending,
-    Limit: 10,
+store := protodb.NewStore[*userpb.User](db, "users",
+    protodb.IndexFields[*userpb.User]("email", "age"),
+)
+store.Upsert(protodb.StoreEntryInput[*userpb.User]{
+    Key:   "user1",
+    Value: &userpb.User{Name: "Alice", Email: "alice@example.com", Age: 30},
 })
+user, _ := store.Get("user1") // returns *userpb.User
 ```
 
-**Bulk operations:**
+**Querying with filters:**
 
 ```go
-store.BulkUpsert([]sidb.EntryInput{...})
-store.DeleteByGrouping("session-123")
+results, _ := store.Query().
+    Where("age", protodb.OpGreaterThan, 25).
+    Where("email", protodb.OpLike, "%@example.com").
+    Limit(10).
+    Exec()
 ```
+
+## File Reference
+
+- **main.go**: Core library (Database, Store, all operations, schema DDL)
+- **main_test.go**: Core test suite
+- **internal/testpb/test.proto**: Test protobuf definitions
+- **go.mod**: Module definition (`github.com/germtb/protodb`)
