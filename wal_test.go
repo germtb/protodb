@@ -26,7 +26,8 @@ func TestWALAppendAndReplay(t *testing.T) {
 	wal.Close()
 
 	table := newMemtable()
-	err = replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	err = wal2.replay(&table)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +52,8 @@ func TestWALReplayTombstone(t *testing.T) {
 	wal.Close()
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	_, err := table.Get(1)
 	if err != ErrDeleted {
@@ -68,7 +70,8 @@ func TestWALReplayEmptyValue(t *testing.T) {
 	wal.Close()
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	got, err := table.Get(1)
 	if err != nil {
@@ -93,7 +96,8 @@ func TestWALReplayOverwrite(t *testing.T) {
 	wal.Close()
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	got, _ := table.Get(1)
 	if string(got) != "third" {
@@ -103,7 +107,8 @@ func TestWALReplayOverwrite(t *testing.T) {
 
 func TestWALReplayNonexistentFile(t *testing.T) {
 	table := newMemtable()
-	err := replayWAL("/no/such/file", &table)
+	wal2, _ := newWAL("/no/such/file")
+	err := wal2.replay(&table)
 	if err != nil {
 		t.Fatalf("expected nil error for nonexistent WAL, got %v", err)
 	}
@@ -118,7 +123,8 @@ func TestWALReplayEmptyFile(t *testing.T) {
 	os.WriteFile(walPath, []byte{}, 0644)
 
 	table := newMemtable()
-	err := replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	err := wal2.replay(&table)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +140,8 @@ func TestWALReplayTruncatedFrameLen(t *testing.T) {
 	os.WriteFile(walPath, []byte{0x00, 0x01}, 0644)
 
 	table := newMemtable()
-	err := replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	err := wal2.replay(&table)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +159,8 @@ func TestWALReplayTruncatedChecksum(t *testing.T) {
 	os.WriteFile(walPath, buf[:], 0644)
 
 	table := newMemtable()
-	err := replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	err := wal2.replay(&table)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +187,8 @@ func TestWALReplayTruncatedPayload(t *testing.T) {
 	f.Close()
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	// First entry should survive
 	got, _ := table.Get(1)
@@ -208,7 +217,8 @@ func TestWALReplayBadChecksum(t *testing.T) {
 	os.WriteFile(walPath, data, 0644)
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	got, _ := table.Get(1)
 	if string(got) != "good" {
@@ -240,7 +250,8 @@ func TestWALReplayFrameLenZero(t *testing.T) {
 	f.Close()
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	got, _ := table.Get(1)
 	if string(got) != "good" {
@@ -257,7 +268,8 @@ func TestWALReplayGarbage(t *testing.T) {
 	os.WriteFile(walPath, garbage, 0644)
 
 	table := newMemtable()
-	err := replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	err := wal2.replay(&table)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +293,8 @@ func TestWALReplayTruncatesToLastGood(t *testing.T) {
 	f.Close()
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	afterSize := fileSize(t, walPath)
 	if afterSize != beforeSize {
@@ -306,7 +319,8 @@ func TestWALClear(t *testing.T) {
 
 	// Replay should yield nothing
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 	if table.Len() != 0 {
 		t.Errorf("expected empty memtable after replay of cleared WAL, got %d", table.Len())
 	}
@@ -323,7 +337,8 @@ func TestWALClearThenAppend(t *testing.T) {
 	wal.Close()
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	_, err := table.Get(1)
 	if err != ErrNotFound {
@@ -349,7 +364,8 @@ func TestWALLargeValue(t *testing.T) {
 	wal.Close()
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	got, _ := table.Get(1)
 	if len(got) != len(big) {
@@ -373,7 +389,8 @@ func TestWALManyEntries(t *testing.T) {
 	wal.Close()
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	if table.Len() != 10000 {
 		t.Errorf("got %d entries, want 10000", table.Len())
@@ -391,7 +408,8 @@ func TestWALOnlyTombstones(t *testing.T) {
 	wal.Close()
 
 	table := newMemtable()
-	replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	wal2.replay(&table)
 
 	for _, key := range []uint64{1, 2, 3} {
 		_, err := table.Get(key)
@@ -401,14 +419,18 @@ func TestWALOnlyTombstones(t *testing.T) {
 	}
 }
 
-func TestWALNewOnUnwritableDir(t *testing.T) {
+func TestWALWriteOnUnwritableDir(t *testing.T) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0555)
 	defer os.Chmod(dir, 0755)
 
-	_, err := newWAL(filepath.Join(dir, "wal"))
+	wal, err := newWAL(filepath.Join(dir, "wal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = wal.Append(1, []byte("hello"))
 	if err == nil {
-		t.Fatal("expected error creating WAL in unwritable dir")
+		t.Fatal("expected error writing WAL in unwritable dir")
 	}
 }
 
@@ -424,7 +446,8 @@ func TestWALReplayUnreadableFile(t *testing.T) {
 	defer os.Chmod(walPath, 0644)
 
 	table := newMemtable()
-	err := replayWAL(walPath, &table)
+	wal2, _ := newWAL(walPath)
+	err := wal2.replay(&table)
 	if err == nil {
 		t.Fatal("expected error replaying unreadable WAL")
 	}
@@ -433,11 +456,12 @@ func TestWALReplayUnreadableFile(t *testing.T) {
 func TestWALDoubleClose(t *testing.T) {
 	dir := t.TempDir()
 	wal, _ := newWAL(filepath.Join(dir, "wal"))
+	wal.Append(1, []byte("hello"))
 	wal.Close()
-	// Second close should return an error, not panic
+	// Second close should not panic
 	err := wal.Close()
-	if err == nil {
-		t.Fatal("expected error on double close")
+	if err != nil {
+		t.Fatalf("expected nil on double close, got %v", err)
 	}
 }
 

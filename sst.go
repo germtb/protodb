@@ -2,10 +2,13 @@ package protodb
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -72,6 +75,7 @@ type sst struct {
 	cache      *LRU[uint64, sstBlock]
 	blocks     []sstBlockIndex
 	footer     sstFooter
+	hash       string
 	path       string
 	fileSize   int64
 }
@@ -97,8 +101,8 @@ type ReaderOptions struct {
 var BlockSize int = 1024 * 4       // 4Kb
 var SSTSize int = 1024 * 1024 * 16 // 16 Mb
 
-func WriteSST(epochPath string, index uint64, entries Iterator) ([]*sst, error) {
-	tempfile, err := os.CreateTemp(epochPath, "-temp-")
+func WriteSST(path string, entries Iterator) ([]*sst, error) {
+	tempfile, err := os.CreateTemp(path, "-temp-")
 
 	if err != nil {
 		return nil, err
@@ -169,8 +173,12 @@ func WriteSST(epochPath string, index uint64, entries Iterator) ([]*sst, error) 
 			return err
 		}
 
-		name := fmt.Sprintf("%d.sst", index)
-		finalPath := filepath.Join(epochPath, name)
+		tempfile.Seek(0, 0)
+		hasher := sha256.New()
+		io.Copy(hasher, tempfile)
+		hash := hex.EncodeToString(hasher.Sum(nil))
+
+		finalPath := filepath.Join(path, hash)
 		err = os.Rename(tempfile.Name(), finalPath)
 
 		if err != nil {
@@ -179,9 +187,9 @@ func WriteSST(epochPath string, index uint64, entries Iterator) ([]*sst, error) 
 
 		ssts = append(ssts, &sst{
 			cache:    newLRU[uint64, sstBlock](128, nil),
-			index:    index,
 			blocks:   blocks,
 			footer:   footer,
+			hash:     hash,
 			path:     finalPath,
 			fileSize: int64(offset) + int64(len(blocks))*sstBlockIndexSize + footerSize,
 		})
@@ -190,8 +198,7 @@ func WriteSST(epochPath string, index uint64, entries Iterator) ([]*sst, error) 
 		firstKey = 0
 		firstIteration = true
 		blocks = make([]sstBlockIndex, 0)
-		index += 1
-		tempfile, err = os.CreateTemp(epochPath, "-temp-")
+		tempfile, err = os.CreateTemp(path, "-temp-")
 
 		return err
 	}
@@ -253,8 +260,8 @@ func WriteSST(epochPath string, index uint64, entries Iterator) ([]*sst, error) 
 	return ssts, nil
 }
 
-func ReadSST(epochPath string, index uint64, options *ReaderOptions) (*sst, error) {
-	path := filepath.Join(epochPath, fmt.Sprintf("%d.sst", index))
+func ReadSST(path string, hash string, options *ReaderOptions) (*sst, error) {
+	path = filepath.Join(path, hash)
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -329,9 +336,9 @@ func ReadSST(epochPath string, index uint64, options *ReaderOptions) (*sst, erro
 
 	return &sst{
 		cache:    newLRU[uint64, sstBlock](128, nil),
-		index:    index,
 		blocks:   blocks,
 		footer:   footer,
+		hash:     hash,
 		path:     path,
 		fileSize: fileSize,
 	}, nil

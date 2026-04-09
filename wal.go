@@ -21,8 +21,8 @@ import (
 // On replay, a frame with a bad checksum or short read stops replay.
 // The file is truncated to the end of the last valid frame.
 
-const walHeaderSize = 4 + 4      // frame_len + crc32
-const walEntryFixedSize = 8 + 8  // key + len
+const walHeaderSize = 4 + 4     // frame_len + crc32
+const walEntryFixedSize = 8 + 8 // key + len
 const walTombstone uint64 = ^uint64(0)
 
 type WAL struct {
@@ -31,18 +31,29 @@ type WAL struct {
 }
 
 func newWAL(path string) (*WAL, error) {
-	handle, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, err
-	}
-
 	return &WAL{
 		path:   path,
-		handle: handle,
+		handle: nil,
 	}, nil
 }
 
+func (wal *WAL) open() error {
+	if wal.handle != nil {
+		return nil
+	}
+	handle, err := os.OpenFile(wal.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	wal.handle = handle
+	return nil
+}
+
 func (wal *WAL) Append(key uint64, value []byte) error {
+	if err := wal.open(); err != nil {
+		return err
+	}
+
 	var buf bytes.Buffer
 	writeFrame(&buf, key, value)
 	return wal.Write(buf.Bytes())
@@ -80,15 +91,24 @@ func writeFrame(buf *bytes.Buffer, key uint64, value []byte) {
 }
 
 func (wal *WAL) Write(data []byte) error {
+	if err := wal.open(); err != nil {
+		return err
+	}
 	_, err := wal.handle.Write(data)
 	return err
 }
 
 func (wal *WAL) Sync() error {
+	if wal.handle == nil {
+		return nil
+	}
 	return wal.handle.Sync()
 }
 
 func (wal *WAL) Clear() error {
+	if wal.handle == nil {
+		return nil
+	}
 	if err := wal.handle.Truncate(0); err != nil {
 		return err
 	}
@@ -97,16 +117,24 @@ func (wal *WAL) Clear() error {
 }
 
 func (wal *WAL) Close() error {
-	return wal.handle.Close()
+	if wal.handle == nil {
+		return nil
+	}
+	err := wal.handle.Close()
+	wal.handle = nil
+	return err
 }
 
 func (wal *WAL) Drop() error {
+	if wal.handle == nil {
+		return nil
+	}
 	wal.handle.Truncate(0)
 	return wal.handle.Close()
 }
 
-func replayWAL(path string, table *memtable) error {
-	data, err := os.ReadFile(path)
+func (wal *WAL) replay(table *memtable) error {
+	data, err := os.ReadFile(wal.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -160,7 +188,7 @@ func replayWAL(path string, table *memtable) error {
 
 	// Truncate to last good frame to clean up any partial write
 	if lastGoodOffset < int64(len(data)) {
-		os.Truncate(path, lastGoodOffset)
+		os.Truncate(wal.path, lastGoodOffset)
 	}
 
 	return nil

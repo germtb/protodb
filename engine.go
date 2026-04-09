@@ -3,12 +3,9 @@ package protodb
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"math"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 )
 
@@ -22,9 +19,9 @@ type Engine struct {
 	memtable   memtable
 	ssts       []*sst
 	path       string
-	epoch      uint64
 	fileTable  *FileTable
 	wal        *WAL
+	manifest   *Manifest
 }
 
 func (ft *FileTable) getOrOpen(path string) (*os.File, error) {
@@ -79,123 +76,78 @@ func newFileTable(capacity int) *FileTable {
 
 func Open(path string) (*Engine, error) {
 	path = filepath.Join(path, "protodb")
-	_, err := os.ReadDir(path)
+
+	wal, err := newWAL(filepath.Join(path, "wal"))
+	if err != nil {
+		return nil, err
+	}
+
+	manifest, err := newManifest(filepath.Join(path, "manifest"))
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = os.ReadDir(path)
 
 	if errors.Is(err, os.ErrNotExist) {
-		err = os.MkdirAll(filepath.Join(path, "0"), 0755)
-
-		if err != nil {
-			return nil, err
-		}
-
-		wal, err := newWAL(filepath.Join(path, "0", "wal"))
+		err = os.MkdirAll(filepath.Join(path, "objects"), 0755)
 		if err != nil {
 			return nil, err
 		}
 
 		return &Engine{
-			epoch:     0,
 			ssts:      make([]*sst, 0),
 			path:      path,
 			memtable:  newMemtable(),
 			fileTable: newFileTable(128),
 			wal:       wal,
+			manifest:  manifest,
 		}, nil
-	}
-
-	entries, err := os.ReadDir(path)
-
-	if err != nil {
+	} else if err != nil {
 		return nil, err
 	}
+
+	os.MkdirAll(filepath.Join(path, "objects"), 0755)
 
 	ssts := make([]*sst, 0)
-	var epoch uint64 = 0
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		maybeEpoch, err := strconv.ParseUint(entry.Name(), 10, 64)
-
-		if err == nil {
-			epoch = max(epoch, maybeEpoch)
-		}
-	}
-
-	epoch_path := filepath.Join(path, fmt.Sprintf("%d", epoch))
-	walPath := filepath.Join(epoch_path, "wal")
 
 	memtable := newMemtable()
-	err = replayWAL(walPath, &memtable)
+	err = wal.replay(&memtable)
 
 	if err != nil {
 		return nil, err
 	}
 
-	entries, err = os.ReadDir(epoch_path)
-
-	if err != nil {
-		return nil, err
-	}
-
-	heap := newHeap(func(a *sst, b *sst) bool {
-		return a.index > b.index
-	})
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := strings.TrimSuffix(entry.Name(), ".sst")
-
-		maybeIndex, err := strconv.ParseUint(name, 10, 64)
-
-		if err != nil {
-			continue
-		}
-
-		data, err := ReadSST(epoch_path, maybeIndex, nil)
+	for _, entry := range manifest.hashes {
+		sst, err := ReadSST(filepath.Join(path, "objects"), entry, nil)
 
 		if err != nil {
 			return nil, err
 		}
 
-		heap.Push(data)
-	}
-
-	for _ = range heap.Len() {
-		ssts = append(ssts, heap.Pop())
-	}
-
-	wal, err := newWAL(walPath)
-
-	if err != nil {
-		return nil, err
+		ssts = append(ssts, sst)
 	}
 
 	return &Engine{
 		memtable:  memtable,
 		ssts:      ssts,
 		path:      path,
-		epoch:     epoch,
 		fileTable: newFileTable(128),
 		wal:       wal,
+		manifest:  manifest,
 	}, nil
 }
 
 func (e *Engine) WALPath() string {
-	return filepath.Join(e.EpochPath(), "wal")
+	return filepath.Join(e.path, "wal")
 }
 
-func (e *Engine) EpochPath() string {
-	return filepath.Join(e.path, fmt.Sprintf("%d", e.epoch))
+func (e *Engine) ObjectsPath() string {
+	return filepath.Join(e.path, "objects")
 }
 
-func (e *Engine) NextEpochPath() string {
-	return filepath.Join(e.path, fmt.Sprintf("%d", e.epoch+1))
+func (e *Engine) ObjectPath(hash string) string {
+	return filepath.Join(e.ObjectsPath(), hash)
 }
 
 func (e *Engine) Close() error {
@@ -356,9 +308,19 @@ func (e *Engine) Flush() error {
 	e.flushMutex.Lock()
 	defer e.flushMutex.Unlock()
 
-	index := uint64(len(e.ssts))
-	new_ssts, err := WriteSST(e.EpochPath(), index, e.memtable.Entries())
+	new_ssts, err := WriteSST(e.ObjectsPath(), e.memtable.Entries())
 
+	if err != nil {
+		return err
+	}
+
+	var newHashes []string
+	for _, sst := range new_ssts {
+		newHashes = append(newHashes, sst.hash)
+	}
+	e.manifest.Prepend(newHashes)
+
+	err = e.manifest.Save()
 	if err != nil {
 		return err
 	}
@@ -370,55 +332,41 @@ func (e *Engine) Flush() error {
 	return nil
 }
 
-func (e *Engine) Sync() error {
-	return nil
-}
-
 func (e *Engine) Compact() error {
 	e.flushMutex.Lock()
 	defer e.flushMutex.Unlock()
 
 	entries := e.scan(0, math.MaxUint64, e.memtable.Scan(0, math.MaxUint64), e.ssts)
-	temp_epoch_path := e.NextEpochPath() + "-temp-"
-	err := os.MkdirAll(temp_epoch_path, 0755)
+
+	new_ssts, err := WriteSST(e.ObjectsPath(), entries)
 
 	if err != nil {
 		return err
 	}
 
-	new_ssts, err := WriteSST(temp_epoch_path, 0, entries)
-
-	if err != nil {
-		os.RemoveAll(temp_epoch_path)
-		return err
+	e.manifest.Clear()
+	for _, sst := range new_ssts {
+		e.manifest.Append(sst.hash)
 	}
 
-	err = os.Rename(temp_epoch_path, e.NextEpochPath())
-
+	err = e.manifest.Save()
 	if err != nil {
 		return err
 	}
-
-	for _, s := range new_ssts {
-		s.path = filepath.Join(e.NextEpochPath(), fmt.Sprintf("%d.sst", s.index))
-	}
-
-	oldEpochPath := e.EpochPath()
 
 	e.fileTable.Clear()
 	e.ssts = new_ssts
 	e.memtable = newMemtable()
-	e.epoch += 1
-	wal, err := newWAL(e.WALPath())
+	err = e.wal.Clear()
 	if err != nil {
 		return err
 	}
-	oldWal := e.wal
-	e.wal = wal
 
-	// Now it is safe to delete the old epoch
-	oldWal.Drop()
-	return os.RemoveAll(oldEpochPath)
+	return nil
+}
+
+func (e *Engine) Sync() error {
+	return nil
 }
 
 type txEntry struct {
