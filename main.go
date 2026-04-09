@@ -15,7 +15,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// This package is the Si(mple) DB library.
+// Protobuf backed storage
 
 type Database struct {
 	Path       string
