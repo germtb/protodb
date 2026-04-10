@@ -25,18 +25,25 @@ const keyLenSize = 4
 const valueLenSize = 4
 const walTombstone uint32 = 0xFFFFFFFF
 
+const DefaultWALFlushBytes int = 32 * 1024 // 32Kb
+const DefaultWALSyncBytes int = 0          // Rely on the OS
+
 type WAL struct {
-	path       string
-	handle     *os.File
-	buf        bytes.Buffer
-	bufferSize int
+	path           string
+	handle         *os.File
+	buf            bytes.Buffer
+	unsyncedBytes  int
+	flushThreshold int
+	syncThreshold  int // fsync threshold; 0 = never auto-sync, rely on OS
 }
 
-func newWAL(path string, bufferSize int) (*WAL, error) {
+func newWAL(path string) (*WAL, error) {
 	return &WAL{
-		path:       path,
-		handle:     nil,
-		bufferSize: bufferSize,
+		path:           path,
+		handle:         nil,
+		unsyncedBytes:  0,
+		flushThreshold: DefaultWALFlushBytes,
+		syncThreshold:  DefaultWALSyncBytes,
 	}, nil
 }
 
@@ -52,6 +59,12 @@ func (wal *WAL) open() error {
 	return nil
 }
 
+func (wal *WAL) Append(key Key, value []byte) error {
+	batch := wal.Batch()
+	batch.Put(key, value)
+	return batch.Commit()
+}
+
 func (wal *WAL) flush() error {
 	if wal.buf.Len() == 0 {
 		return nil
@@ -63,6 +76,24 @@ func (wal *WAL) flush() error {
 	_, err = wal.handle.Write(wal.buf.Bytes())
 	wal.buf.Reset()
 	return err
+}
+
+func (wal *WAL) sync() error {
+	err := wal.flush()
+	if err != nil {
+		return err
+	}
+	if wal.handle == nil {
+		return nil
+	}
+	err = wal.handle.Sync()
+	if err != nil {
+		return err
+	}
+
+	wal.unsyncedBytes = 0
+	return nil
+
 }
 
 type WALBatch struct {
@@ -85,14 +116,38 @@ func (batch *WALBatch) Delete(key Key) {
 	batch.byteSize += len(key)
 }
 
-func (batch *WALBatch) Commit() error {
-	return batch.wal.Write(batch.buf.Bytes())
+func (wal *WAL) maybeFlush() error {
+	if wal.buf.Len() >= wal.flushThreshold {
+		return wal.flush()
+	}
+
+	return nil
 }
 
-func (wal *WAL) Append(key Key, value []byte) error {
-	batch := wal.Batch()
-	batch.Put(key, value)
-	return batch.Commit()
+func (wal *WAL) maybeSync() error {
+	if wal.syncThreshold > 0 && wal.unsyncedBytes >= wal.syncThreshold {
+		return wal.sync()
+	}
+
+	return nil
+}
+
+func (batch *WALBatch) Commit() error {
+	bytes := batch.buf.Bytes()
+	batch.wal.buf.Write(bytes)
+	batch.wal.unsyncedBytes += len(bytes)
+
+	err := batch.wal.maybeFlush()
+	if err != nil {
+		return err
+	}
+
+	err = batch.wal.maybeSync()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func writeFrame(buf *bytes.Buffer, key Key, value []byte) {
@@ -124,27 +179,9 @@ func writeFrame(buf *bytes.Buffer, key Key, value []byte) {
 	buf.Write(frame)
 }
 
-func (wal *WAL) Write(data []byte) error {
-	wal.buf.Write(data)
-	if wal.buf.Len() >= wal.bufferSize {
-		return wal.flush()
-	}
-	return nil
-}
-
-func (wal *WAL) Sync() error {
-	err := wal.flush()
-	if err != nil {
-		return err
-	}
-	if wal.handle == nil {
-		return nil
-	}
-	return wal.handle.Sync()
-}
-
 func (wal *WAL) Clear() error {
 	wal.buf.Reset()
+	wal.unsyncedBytes = 0
 	if wal.handle == nil {
 		return nil
 	}
@@ -157,7 +194,8 @@ func (wal *WAL) Clear() error {
 }
 
 func (wal *WAL) Close() error {
-	err := wal.flush()
+	// Sync any unsynced bytes before closing — clean shutdown must be durable.
+	err := wal.sync()
 	if err != nil {
 		return err
 	}
@@ -171,6 +209,7 @@ func (wal *WAL) Close() error {
 
 func (wal *WAL) Drop() error {
 	wal.buf.Reset()
+	wal.unsyncedBytes = 0
 	if wal.handle == nil {
 		return nil
 	}

@@ -14,14 +14,21 @@ type Level struct {
 	ssts     []*sst
 }
 
+type Policy struct {
+	CompactionThreshold uint64
+	FlushThreshold      uint64
+}
+
 type Engine struct {
-	flushMutex sync.RWMutex
-	memtable   memtable
-	path       string
-	fileTable  *FileTable
-	wal        *WAL
-	l0         *Level
-	l1         *Level
+	flushMutex      sync.RWMutex
+	compactionMutex sync.RWMutex
+	memtable        memtable
+	path            string
+	fileTable       *FileTable
+	wal             *WAL
+	l0              *Level
+	l1              *Level
+	policy          *Policy
 }
 
 func newLevel(path string, name string) (*Level, error) {
@@ -48,24 +55,15 @@ func newLevel(path string, name string) (*Level, error) {
 	}, nil
 }
 
-type Options struct {
-	WALBufferSize int
-}
-
-func Open(path string, opts ...Options) (*Engine, error) {
+func Open(path string) (*Engine, error) {
 	path = filepath.Join(path, "protodb")
-
-	walBufferSize := 0
-	if len(opts) > 0 {
-		walBufferSize = opts[0].WALBufferSize
-	}
 
 	err := os.MkdirAll(filepath.Join(path, "objects"), 0755)
 	if err != nil {
 		return nil, err
 	}
 
-	wal, err := newWAL(filepath.Join(path, "wal"), walBufferSize)
+	wal, err := newWAL(filepath.Join(path, "wal"))
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +92,11 @@ func Open(path string, opts ...Options) (*Engine, error) {
 		wal:       wal,
 		l0:        l0,
 		l1:        l1,
+		policy: &Policy{
+			CompactionThreshold: 4,                // 4 L0 ssts
+			FlushThreshold:      1024 * 1024 * 64, // 64Mb
+
+		},
 	}, nil
 }
 
@@ -105,11 +108,11 @@ func (e *Engine) ObjectsPath() string {
 	return filepath.Join(e.path, "objects")
 }
 
-func (e *Engine) ObjectPath(hash string) string {
-	return filepath.Join(e.ObjectsPath(), hash)
-}
-
 func (e *Engine) Close() error {
+	e.compactionMutex.Lock()
+	defer e.compactionMutex.Unlock()
+	e.flushMutex.Lock()
+	defer e.flushMutex.Unlock()
 	e.fileTable.Clear()
 	return e.wal.Close()
 }
@@ -464,10 +467,34 @@ func (e *Engine) scan(lo, hi Key, memSource Iterator, l0ssts []*sst, l1ssts []*s
 	return newMergeIterator(sources)
 }
 
+func (e *Engine) maybeFlushLocked() error {
+	if e.memtable.ByteSize() <= e.policy.FlushThreshold {
+		return nil
+	}
+	if err := e.flushLocked(); err != nil {
+		return err
+	}
+	// Auto-flush triggers a background compaction. Manual Flush() does not —
+	// tests that inspect L0/L1 state immediately after Flush() rely on it
+	// being a synchronous, side-effect-free checkpoint.
+	if len(e.l0.ssts) > int(e.policy.CompactionThreshold) {
+		if e.compactionMutex.TryLock() {
+			go func() {
+				defer e.compactionMutex.Unlock()
+				e.compactLocked()
+			}()
+		}
+	}
+	return nil
+}
+
 func (e *Engine) Flush() error {
 	e.flushMutex.Lock()
 	defer e.flushMutex.Unlock()
+	return e.flushLocked()
+}
 
+func (e *Engine) flushLocked() error {
 	new_ssts, err := WriteSST(e.ObjectsPath(), e.memtable.Entries())
 
 	if err != nil {
@@ -493,6 +520,12 @@ func (e *Engine) Flush() error {
 }
 
 func (e *Engine) Compact() error {
+	e.compactionMutex.Lock()
+	defer e.compactionMutex.Unlock()
+	return e.compactLocked()
+}
+
+func (e *Engine) compactLocked() error {
 	e.flushMutex.Lock()
 
 	l0ssts := make([]*sst, len(e.l0.ssts))
@@ -541,7 +574,8 @@ func (e *Engine) Compact() error {
 	return nil
 }
 
-func (e *Engine) Sync() error {
+func (e *Engine) CloudSync() error {
+	// TODO
 	return nil
 }
 
@@ -602,7 +636,12 @@ func (tx *Transaction) Apply() error {
 		}
 	}
 
-	return batch.Commit()
+	err := batch.Commit()
+	if err != nil {
+		return err
+	}
+
+	return tx.engine.maybeFlushLocked()
 }
 
 func (tx *Transaction) Cancel() {

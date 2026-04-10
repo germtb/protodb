@@ -97,7 +97,7 @@ func initBadger(b *testing.B) *badger.DB {
 
 func initLSM(b *testing.B) *protodb.Engine {
 	b.Helper()
-	engine, err := protodb.Open(b.TempDir(), protodb.Options{WALBufferSize: 32 * 1024})
+	engine, err := protodb.Open(b.TempDir())
 	if err != nil {
 		b.Fatal(err)
 	}

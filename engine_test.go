@@ -20,6 +20,7 @@ func openTestEngine(t *testing.T) *Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = engine.Close() })
 	return engine
 }
 
@@ -545,6 +546,7 @@ func TestEngineUnflushedDataRecoveredOnReopen(t *testing.T) {
 	engine.Put(key(1), []byte("flushed"))
 	engine.Flush()
 	engine.Put(key(2), []byte("not flushed"))
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -1456,6 +1458,7 @@ func TestCrashRecoveryViaWAL(t *testing.T) {
 
 	// Put more data but don't flush - simulate crash
 	engine.Put(key(2), []byte("unflushed"))
+	engine.Close()
 
 	reopened, err := Open(dir)
 	if err != nil {
@@ -1663,7 +1666,7 @@ func TestCompactDeletesOldSSTs(t *testing.T) {
 	oldHashes := make([]string, len(engine.l0.ssts))
 	for idx, s := range engine.l0.ssts {
 		oldHashes[idx] = s.hash
-		sstPath := engine.ObjectPath(s.hash)
+		sstPath := filepath.Join(engine.ObjectsPath(), s.hash)
 		if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
 			t.Fatalf("expected SST %s to exist before compact", s.hash)
 		}
@@ -1677,7 +1680,7 @@ func TestCompactDeletesOldSSTs(t *testing.T) {
 	// New compacted SSTs should exist
 	_ = oldHashes // GC of old objects is separate
 	for _, s := range engine.l1.ssts {
-		sstPath := engine.ObjectPath(s.hash)
+		sstPath := filepath.Join(engine.ObjectsPath(), s.hash)
 		if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
 			t.Errorf("expected compacted SST at %s", sstPath)
 		}
@@ -1978,7 +1981,7 @@ func TestCompactCreatesObjectFiles(t *testing.T) {
 
 	// Each SST should have a file in the objects directory
 	for _, s := range engine.l1.ssts {
-		sstPath := engine.ObjectPath(s.hash)
+		sstPath := filepath.Join(engine.ObjectsPath(), s.hash)
 		if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
 			t.Errorf("expected SST file at %s", sstPath)
 		}
@@ -2190,7 +2193,7 @@ func TestFlushAfterCompactWritesToObjects(t *testing.T) {
 
 	// The new SST should be in the objects directory
 	lastSST := engine.l0.ssts[len(engine.l0.ssts)-1]
-	sstPath := engine.ObjectPath(lastSST.hash)
+	sstPath := filepath.Join(engine.ObjectsPath(), lastSST.hash)
 	if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
 		t.Errorf("expected SST at %s after flush post-compact", sstPath)
 	}
@@ -2301,14 +2304,6 @@ func TestEngineClose(t *testing.T) {
 	err := engine.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
-	}
-}
-
-func TestEngineSync(t *testing.T) {
-	engine := openTestEngine(t)
-	err := engine.Sync()
-	if err != nil {
-		t.Fatalf("Sync: %v", err)
 	}
 }
 
@@ -2597,6 +2592,7 @@ func TestWALRecoveryBasic(t *testing.T) {
 	engine.Put(key(2), []byte("b"))
 	engine.Put(key(3), []byte("c"))
 	// No flush — all data is only in the WAL
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2622,6 +2618,7 @@ func TestWALRecoveryOverwrite(t *testing.T) {
 	engine.Put(key(1), []byte("v1"))
 	engine.Put(key(1), []byte("v2"))
 	engine.Put(key(1), []byte("v3"))
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2645,6 +2642,7 @@ func TestWALRecoveryDelete(t *testing.T) {
 	engine.Put(key(1), []byte("a"))
 	engine.Put(key(2), []byte("b"))
 	engine.Delete(key(1))
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2676,6 +2674,7 @@ func TestWALRecoveryDeleteThenPut(t *testing.T) {
 	engine.Put(key(1), []byte("first"))
 	engine.Delete(key(1))
 	engine.Put(key(1), []byte("resurrected"))
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2698,6 +2697,7 @@ func TestWALRecoveryEmptyValue(t *testing.T) {
 
 	engine.Put(key(1), []byte{})
 	engine.Put(key(2), []byte("notempty"))
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2734,6 +2734,7 @@ func TestWALClearedAfterFlush(t *testing.T) {
 
 	// After flush, WAL is cleared. Put new data.
 	engine.Put(key(1), []byte("after"))
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2758,6 +2759,7 @@ func TestWALRecoveryShadowsSST(t *testing.T) {
 	engine.Put(key(1), []byte("old"))
 	engine.Flush()
 	engine.Put(key(1), []byte("new")) // in WAL only
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2781,6 +2783,7 @@ func TestWALRecoveryDeleteShadowsSST(t *testing.T) {
 	engine.Put(key(1), []byte("flushed"))
 	engine.Flush()
 	engine.Delete(key(1)) // WAL tombstone
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2804,6 +2807,7 @@ func TestWALRecoveryManyEntries(t *testing.T) {
 	for idx := uint64(0); idx < 1000; idx++ {
 		engine.Put(key(idx), []byte(fmt.Sprintf("v%d", idx)))
 	}
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2832,6 +2836,7 @@ func TestWALRecoveryAfterMultipleFlushes(t *testing.T) {
 	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 	engine.Put(key(3), []byte("c")) // only this is in the WAL
+	engine.Close()
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2856,6 +2861,7 @@ func TestWALTruncatedEntry(t *testing.T) {
 
 	engine.Put(key(1), []byte("good"))
 	engine.Put(key(2), []byte("also good"))
+	engine.Close() // sync WAL to disk before manipulating it
 
 	// Corrupt the WAL: truncate the last few bytes to simulate crash mid-write
 	walPath := filepath.Join(dir, "protodb", "wal")
@@ -2891,6 +2897,7 @@ func TestWALCorruptedChecksum(t *testing.T) {
 	engine.Put(key(1), []byte("good"))
 	engine.Put(key(2), []byte("will be corrupted"))
 	engine.Put(key(3), []byte("after corruption"))
+	engine.Close() // sync WAL to disk before manipulating it
 
 	// Corrupt the second entry's checksum
 	walPath := filepath.Join(dir, "protodb", "wal")
@@ -2964,6 +2971,8 @@ func TestWALClearedAfterCompaction(t *testing.T) {
 		}
 	}
 
+	engine.Close() // sync WAL to disk before reopen
+
 	// Reopen — no WAL to replay, data is in the compacted SST
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2990,6 +2999,7 @@ func TestWALRecoveryScan(t *testing.T) {
 	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 	engine.Put(key(2), []byte("b")) // in WAL only
+	engine.Close()                  // sync WAL to disk before reopen
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -3027,6 +3037,7 @@ func TestAdversarialFullLifecycle(t *testing.T) {
 	engine.Flush()
 	engine.Put(key(4), []byte("v4"))
 	engine.Compact()
+	engine.Close() // sync WAL to disk before reopen
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -3157,6 +3168,7 @@ func TestAdversarialCompactMixedSources(t *testing.T) {
 	engine.Put(key(1), []byte("wal-a-overwrite"))
 
 	engine.Compact()
+	engine.Close() // sync WAL to disk before reopen
 
 	reopened, _ := Open(dir)
 
@@ -5772,6 +5784,90 @@ func TestCompactEmptyL0(t *testing.T) {
 		want := fmt.Sprintf("value_%d", k)
 		if string(got) != want {
 			t.Errorf("Get(%d): got %q, want %q", k, got, want)
+		}
+	}
+}
+
+// TestAggressiveAutoCompaction stresses the auto-flush and auto-compaction
+// pipeline by setting both thresholds to zero, so every Apply triggers a
+// flush and every flush triggers a compaction. This exercises the worst case
+// for the TryLock + cross-goroutine compactionMutex pattern: maximum spawn
+// rate, maximum coalescing, and Close racing with in-flight compactions.
+//
+// Run with -race to validate the locking story.
+func TestAggressiveAutoCompaction(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force every write to flush, every flush to spawn a compaction.
+	engine.policy.FlushThreshold = 0
+	engine.policy.CompactionThreshold = 0
+
+	const writers = 4
+	const writesPerWriter = 250
+	const totalKeys = writers * writesPerWriter
+
+	// Reference model: track expected final value for each key.
+	var refMu sync.Mutex
+	ref := make(map[uint64]string, totalKeys)
+
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			for i := 0; i < writesPerWriter; i++ {
+				k := uint64(writerID*writesPerWriter + i)
+				v := fmt.Sprintf("w%d-i%d", writerID, i)
+				if err := engine.Put(key(k), []byte(v)); err != nil {
+					t.Errorf("Put(%d): %v", k, err)
+					return
+				}
+				refMu.Lock()
+				ref[k] = v
+				refMu.Unlock()
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	// Verify every key while the engine is still alive.
+	for k, want := range ref {
+		got, err := engine.Get(key(k))
+		if err != nil {
+			t.Fatalf("Get(%d): %v", k, err)
+		}
+		if string(got) != want {
+			t.Errorf("Get(%d) live: got %q, want %q", k, got, want)
+		}
+	}
+
+	// Close should drain any in-flight compaction goroutine via the
+	// compactionMutex. If it didn't, we'd see a goroutine leak or use-after-
+	// close panic on the next reopen.
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen and verify all data survived. Anything that was in the WAL at
+	// Close time must replay correctly; anything that was in an SST must be
+	// in the L1 (since CompactionThreshold=0 means everything flowed down).
+	engine2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	for k, want := range ref {
+		got, err := engine2.Get(key(k))
+		if err != nil {
+			t.Fatalf("Get(%d) reopen: %v", k, err)
+		}
+		if string(got) != want {
+			t.Errorf("Get(%d) reopen: got %q, want %q", k, got, want)
 		}
 	}
 }
