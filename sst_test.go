@@ -118,15 +118,8 @@ func TestEmptySST(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := ReadSST(dir, ssts[0].hash, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.footer.BlockCount != 0 {
-		t.Fatalf("block count: got %d, want 0", s.footer.BlockCount)
-	}
-	if len(s.blocks) != 0 {
-		t.Fatalf("blocks: got %d entries, want 0", len(s.blocks))
+	if len(ssts) != 0 {
+		t.Fatalf("expected 0 SSTs for empty input, got %d", len(ssts))
 	}
 }
 

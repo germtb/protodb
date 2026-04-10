@@ -45,6 +45,10 @@ func (m *Manifest) Clear() {
 	m.hashes = make([]string, 0)
 }
 
+func (m *Manifest) TrimEnd(l int) {
+	m.hashes = m.hashes[:len(m.hashes)-l]
+}
+
 func (m *Manifest) Save() error {
 	content := strings.Join(m.hashes, "\n") + "\n"
 

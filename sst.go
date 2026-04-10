@@ -78,6 +78,7 @@ type sst struct {
 	hash       string
 	path       string
 	fileSize   int64
+	firstKey   uint64
 }
 
 type reader interface {
@@ -192,6 +193,7 @@ func WriteSST(path string, entries Iterator) ([]*sst, error) {
 			hash:     hash,
 			path:     finalPath,
 			fileSize: int64(offset) + int64(len(blocks))*sstBlockIndexSize + footerSize,
+			firstKey: blocks[0].FirstKey,
 		})
 
 		offset = 0
@@ -251,10 +253,12 @@ func WriteSST(path string, entries Iterator) ([]*sst, error) {
 		blockEntries += 1
 	}
 
-	err = finishSST()
+	if blockEntries > 0 || len(blocks) > 0 {
+		err = finishSST()
 
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return ssts, nil
@@ -341,6 +345,7 @@ func ReadSST(path string, hash string, options *ReaderOptions) (*sst, error) {
 		hash:     hash,
 		path:     path,
 		fileSize: fileSize,
+		firstKey: blocks[0].FirstKey,
 	}, nil
 }
 

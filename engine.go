@@ -6,117 +6,32 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 )
 
-type FileTable struct {
-	mu  sync.Mutex
-	lru *LRU[string, *os.File]
+type Level struct {
+	manifest *Manifest
+	ssts     []*sst
 }
 
 type Engine struct {
 	flushMutex sync.RWMutex
 	memtable   memtable
-	ssts       []*sst
 	path       string
 	fileTable  *FileTable
 	wal        *WAL
-	manifest   *Manifest
+	l0         *Level
+	l1         *Level
 }
 
-func (ft *FileTable) getOrOpen(path string) (*os.File, error) {
-	ft.mu.Lock()
-	defer ft.mu.Unlock()
-
-	handle, ok := ft.lru.Get(path)
-	if ok {
-		return handle, nil
-	}
-
-	file, err := os.Open(path)
+func newLevel(path string, name string) (*Level, error) {
+	manifest, err := newManifest(filepath.Join(path, name))
 	if err != nil {
 		return nil, err
 	}
-	ft.lru.Put(path, file)
-	return file, nil
-}
-
-func (ft *FileTable) Read(path string, offset int64, length int64) ([]byte, error) {
-	handle, err := ft.getOrOpen(path)
-	if err != nil {
-		return nil, err
-	}
-
-	buffer := make([]byte, length)
-	if _, err := handle.ReadAt(buffer, offset); err != nil {
-		return nil, err
-	}
-	return buffer, nil
-}
-
-func (ft *FileTable) Close(path string) {
-	ft.mu.Lock()
-	defer ft.mu.Unlock()
-	ft.lru.Remove(path)
-}
-
-func (ft *FileTable) Clear() {
-	ft.mu.Lock()
-	defer ft.mu.Unlock()
-	ft.lru.Clear()
-}
-
-func newFileTable(capacity int) *FileTable {
-	return &FileTable{
-		lru: newLRU(capacity, func(path string, file *os.File) {
-			file.Close()
-		}),
-	}
-}
-
-func Open(path string) (*Engine, error) {
-	path = filepath.Join(path, "protodb")
-
-	wal, err := newWAL(filepath.Join(path, "wal"))
-	if err != nil {
-		return nil, err
-	}
-
-	manifest, err := newManifest(filepath.Join(path, "manifest"))
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = os.ReadDir(path)
-
-	if errors.Is(err, os.ErrNotExist) {
-		err = os.MkdirAll(filepath.Join(path, "objects"), 0755)
-		if err != nil {
-			return nil, err
-		}
-
-		return &Engine{
-			ssts:      make([]*sst, 0),
-			path:      path,
-			memtable:  newMemtable(),
-			fileTable: newFileTable(128),
-			wal:       wal,
-			manifest:  manifest,
-		}, nil
-	} else if err != nil {
-		return nil, err
-	}
-
-	os.MkdirAll(filepath.Join(path, "objects"), 0755)
 
 	ssts := make([]*sst, 0)
-
-	memtable := newMemtable()
-	err = wal.replay(&memtable)
-
-	if err != nil {
-		return nil, err
-	}
 
 	for _, entry := range manifest.hashes {
 		sst, err := ReadSST(filepath.Join(path, "objects"), entry, nil)
@@ -128,13 +43,49 @@ func Open(path string) (*Engine, error) {
 		ssts = append(ssts, sst)
 	}
 
+	return &Level{
+		manifest,
+		ssts,
+	}, nil
+}
+
+func Open(path string) (*Engine, error) {
+	path = filepath.Join(path, "protodb")
+
+	err := os.MkdirAll(filepath.Join(path, "objects"), 0755)
+	if err != nil {
+		return nil, err
+	}
+
+	wal, err := newWAL(filepath.Join(path, "wal"))
+	if err != nil {
+		return nil, err
+	}
+
+	l0, err := newLevel(path, "l0")
+	if err != nil {
+		return nil, err
+	}
+
+	l1, err := newLevel(path, "l1")
+	if err != nil {
+		return nil, err
+	}
+
+	memtable := newMemtable()
+	err = wal.replay(&memtable)
+
+	if err != nil {
+		return nil, err
+	}
+
 	return &Engine{
 		memtable:  memtable,
-		ssts:      ssts,
 		path:      path,
 		fileTable: newFileTable(128),
 		wal:       wal,
-		manifest:  manifest,
+		l0:        l0,
+		l1:        l1,
 	}, nil
 }
 
@@ -167,42 +118,78 @@ func (e *Engine) Delete(key uint64) error {
 	return tx.Apply()
 }
 
+func (e *Engine) GetInSST(s *sst, key uint64) ([]byte, error) {
+	handle, err := e.fileTable.getOrOpen(s.path)
+	if err != nil {
+		return nil, err
+	}
+
+	value, err := s.Get(key, handle)
+
+	if err == nil {
+		return value, nil
+	}
+
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	} else if errors.Is(err, ErrDeleted) {
+		return nil, ErrDeleted
+	} else if err != nil {
+		return nil, err
+	} else {
+		return value, err
+	}
+}
+
 func (e *Engine) Get(key uint64) ([]byte, error) {
 	e.flushMutex.RLock()
 	defer e.flushMutex.RUnlock()
 
 	value, err := e.memtable.Get(key)
 
-	if err == nil {
+	if errors.Is(err, ErrNotFound) {
+		// maybe another sst has it, continue
+	} else if errors.Is(err, ErrDeleted) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	} else {
 		return value, nil
 	}
 
-	if errors.Is(err, ErrDeleted) {
-		return nil, nil
-	} else if !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
+	for _, s := range e.l0.ssts {
+		value, err := e.GetInSST(s, key)
 
-	for _, s := range e.ssts {
-		handle, err := e.fileTable.getOrOpen(s.path)
-		if err != nil {
-			return nil, err
-		}
-
-		value, err = s.Get(key, handle)
-
-		if err == nil {
-			return value, nil
-		}
-
-		if errors.Is(err, ErrDeleted) {
+		if errors.Is(err, ErrNotFound) {
+			continue
+		} else if errors.Is(err, ErrDeleted) {
 			return nil, nil
-		} else if !errors.Is(err, ErrNotFound) {
+		} else if err != nil {
 			return nil, err
+		} else {
+			return value, err
 		}
 	}
 
-	return nil, nil
+	sstIndex := sort.Search(len(e.l1.ssts), func(i int) bool {
+		return e.l1.ssts[i].FirstKey() > key
+	}) - 1
+
+	if sstIndex < 0 {
+		return nil, nil
+	}
+
+	value, err = e.GetInSST(e.l1.ssts[sstIndex], key)
+
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil
+	} else if errors.Is(err, ErrDeleted) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	} else {
+		return value, nil
+	}
 }
 
 type mergeEntry struct {
@@ -285,22 +272,37 @@ func (e *Engine) Scan(lo, hi uint64) *mergeIterator {
 	// Clone mutates COW flags, so it needs an exclusive lock. It's O(1).
 	e.flushMutex.Lock()
 	snapshot := e.memtable.Clone()
-	ssts := make([]*sst, len(e.ssts))
-	copy(ssts, e.ssts)
+	l0ssts := make([]*sst, len(e.l0.ssts))
+	l1ssts := make([]*sst, len(e.l1.ssts))
+	copy(l0ssts, e.l0.ssts)
+	copy(l1ssts, e.l1.ssts)
 	e.flushMutex.Unlock()
 
-	return e.scan(lo, hi, snapshot.Scan(lo, hi), ssts)
+	return e.scan(lo, hi, snapshot.Scan(lo, hi), l0ssts, l1ssts)
 }
 
-func (e *Engine) scan(lo, hi uint64, memSource Iterator, ssts []*sst) *mergeIterator {
+func (e *Engine) scan(lo, hi uint64, memSource Iterator, l0ssts []*sst, l1ssts []*sst) *mergeIterator {
 	sources := []Iterator{memSource}
-	for _, s := range ssts {
+	for _, s := range l0ssts {
 		handle, err := e.fileTable.getOrOpen(s.path)
 		if err != nil {
 			continue
 		}
 		sources = append(sources, s.Iterator(lo, hi, handle))
 	}
+
+	for _, s := range l1ssts {
+		if s.FirstKey() >= hi {
+			break
+		}
+
+		handle, err := e.fileTable.getOrOpen(s.path)
+		if err != nil {
+			continue
+		}
+		sources = append(sources, s.Iterator(lo, hi, handle))
+	}
+
 	return newMergeIterator(sources)
 }
 
@@ -318,25 +320,43 @@ func (e *Engine) Flush() error {
 	for _, sst := range new_ssts {
 		newHashes = append(newHashes, sst.hash)
 	}
-	e.manifest.Prepend(newHashes)
+	e.l0.manifest.Prepend(newHashes)
 
-	err = e.manifest.Save()
+	err = e.l0.manifest.Save()
 	if err != nil {
 		return err
 	}
 
-	e.ssts = append(new_ssts, e.ssts...)
+	e.l0.ssts = append(new_ssts, e.l0.ssts...)
 	e.memtable = newMemtable()
 	e.wal.Clear()
 
 	return nil
 }
 
+type emptyIterator struct{}
+
+func (it *emptyIterator) Next() bool    { return false }
+func (it *emptyIterator) Key() uint64   { return 0 }
+func (it *emptyIterator) Value() []byte { return nil }
+
 func (e *Engine) Compact() error {
 	e.flushMutex.Lock()
-	defer e.flushMutex.Unlock()
 
-	entries := e.scan(0, math.MaxUint64, e.memtable.Scan(0, math.MaxUint64), e.ssts)
+	l0ssts := make([]*sst, len(e.l0.ssts))
+	l1ssts := make([]*sst, len(e.l1.ssts))
+	copy(l0ssts, e.l0.ssts)
+	copy(l1ssts, e.l1.ssts)
+
+	e.flushMutex.Unlock()
+
+	entries := e.scan(
+		0,
+		math.MaxUint64,
+		&emptyIterator{},
+		l0ssts,
+		l1ssts,
+	)
 
 	new_ssts, err := WriteSST(e.ObjectsPath(), entries)
 
@@ -344,20 +364,24 @@ func (e *Engine) Compact() error {
 		return err
 	}
 
-	e.manifest.Clear()
+	e.flushMutex.Lock()
+	defer e.flushMutex.Unlock()
+
+	e.l1.manifest.Clear()
 	for _, sst := range new_ssts {
-		e.manifest.Append(sst.hash)
+		e.l1.manifest.Append(sst.hash)
 	}
 
-	err = e.manifest.Save()
+	err = e.l1.manifest.Save()
 	if err != nil {
 		return err
 	}
 
-	e.fileTable.Clear()
-	e.ssts = new_ssts
-	e.memtable = newMemtable()
-	err = e.wal.Clear()
+	e.l1.ssts = new_ssts
+
+	e.l0.ssts = e.l0.ssts[:len(e.l0.ssts)-len(l0ssts)]
+	e.l0.manifest.TrimEnd(len(l0ssts))
+	err = e.l0.manifest.Save()
 	if err != nil {
 		return err
 	}

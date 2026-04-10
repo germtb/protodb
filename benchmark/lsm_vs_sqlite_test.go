@@ -459,6 +459,85 @@ func BenchmarkSSTScaling(b *testing.B) {
 	})
 }
 
+// BenchmarkL0vsL1 measures Get and Scan performance with data in L0
+// (unsorted, linear scan) vs L1 (sorted, binary search on SSTs).
+func BenchmarkL0vsL1(b *testing.B) {
+	val := mustMarshal(b, makeItem(0))
+	const sstCount = 50
+	const keysPerSST = 10000
+	const totalKeys = sstCount * keysPerSST
+
+	b.Run("Get/L0", func(b *testing.B) {
+		engine := initLSM(b)
+		defer engine.Close()
+		for sst := 0; sst < sstCount; sst++ {
+			for idx := 0; idx < keysPerSST; idx++ {
+				engine.Put(uint64(sst*keysPerSST+idx), val)
+			}
+			engine.Flush()
+		}
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			engine.Get(uint64(iter) % totalKeys)
+		}
+	})
+
+	b.Run("Get/L1", func(b *testing.B) {
+		engine := initLSM(b)
+		defer engine.Close()
+		for sst := 0; sst < sstCount; sst++ {
+			for idx := 0; idx < keysPerSST; idx++ {
+				engine.Put(uint64(sst*keysPerSST+idx), val)
+			}
+			engine.Flush()
+		}
+		engine.Compact()
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			engine.Get(uint64(iter) % totalKeys)
+		}
+	})
+
+	b.Run("Scan1000/L0", func(b *testing.B) {
+		engine := initLSM(b)
+		defer engine.Close()
+		for sst := 0; sst < sstCount; sst++ {
+			for idx := 0; idx < keysPerSST; idx++ {
+				engine.Put(uint64(sst*keysPerSST+idx), val)
+			}
+			engine.Flush()
+		}
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			count := 0
+			scanner := engine.Scan(0, 1000)
+			for scanner.Next() {
+				count++
+			}
+		}
+	})
+
+	b.Run("Scan1000/L1", func(b *testing.B) {
+		engine := initLSM(b)
+		defer engine.Close()
+		for sst := 0; sst < sstCount; sst++ {
+			for idx := 0; idx < keysPerSST; idx++ {
+				engine.Put(uint64(sst*keysPerSST+idx), val)
+			}
+			engine.Flush()
+		}
+		engine.Compact()
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			count := 0
+			scanner := engine.Scan(0, 1000)
+			for scanner.Next() {
+				count++
+			}
+		}
+	})
+}
+
 // BenchmarkCompaction measures the time to compact N entries that were
 // written across multiple flushes. Each iteration creates a fresh DB,
 // populates it, and times only the compaction.
