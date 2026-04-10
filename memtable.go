@@ -1,12 +1,14 @@
 package protodb
 
 import (
+	"bytes"
+
 	"github.com/google/btree"
 )
 
 type mementry struct {
-	Key   uint64
-	Value []byte
+	key   Key
+	value []byte
 }
 
 type memtable struct {
@@ -17,7 +19,7 @@ type memtable struct {
 func newMemtable() memtable {
 	return memtable{
 		tree: btree.NewG[mementry](32, func(a, b mementry) bool {
-			return a.Key < b.Key
+			return bytes.Compare(a.key, b.key) < 0
 		}),
 		byteSize: 0,
 	}
@@ -30,35 +32,36 @@ func (m *memtable) Clone() memtable {
 	}
 }
 
-func (m *memtable) Put(key uint64, value []byte) {
-	old, replaced := m.tree.ReplaceOrInsert(mementry{Key: key, Value: value})
+func (m *memtable) Put(key Key, value []byte) {
+	old, replaced := m.tree.ReplaceOrInsert(mementry{key: key, value: value})
 	if replaced {
-		m.byteSize -= uint64(len(old.Value))
+		m.byteSize -= uint64(len(old.key)) + uint64(len(old.value))
 	}
-	m.byteSize += uint64(len(value))
+	m.byteSize += uint64(len(key)) + uint64(len(value))
 }
 
-func (m *memtable) Delete(key uint64) {
-	old, replaced := m.tree.ReplaceOrInsert(mementry{Key: key, Value: nil})
+func (m *memtable) Delete(key Key) {
+	old, replaced := m.tree.ReplaceOrInsert(mementry{key: key, value: nil})
 	if replaced {
-		m.byteSize -= uint64(len(old.Value))
+		m.byteSize -= uint64(len(old.key)) + uint64(len(old.value))
 	}
+	m.byteSize += uint64(len(key))
 }
 
 func (m *memtable) Len() int {
 	return m.tree.Len()
 }
 
-func (m *memtable) Get(key uint64) ([]byte, error) {
-	entry, found := m.tree.Get(mementry{Key: key})
+func (m *memtable) Get(key Key) ([]byte, error) {
+	entry, found := m.tree.Get(mementry{key: key})
 
 	if !found {
 		return nil, ErrNotFound
-	} else if entry.Value == nil {
+	} else if entry.value == nil {
 		return nil, ErrDeleted
 	}
 
-	return entry.Value, nil
+	return entry.value, nil
 }
 
 type memtableIterator struct {
@@ -71,17 +74,17 @@ func (it *memtableIterator) Next() bool {
 	return it.pos < len(it.entries)
 }
 
-func (it *memtableIterator) Key() uint64 {
-	return it.entries[it.pos].Key
+func (it *memtableIterator) Key() Key {
+	return it.entries[it.pos].key
 }
 
 func (it *memtableIterator) Value() []byte {
-	return it.entries[it.pos].Value
+	return it.entries[it.pos].value
 }
 
-func (m *memtable) Scan(lo uint64, hi uint64) *memtableIterator {
+func (m *memtable) Scan(lo Key, hi Key) *memtableIterator {
 	var entries []mementry
-	m.tree.AscendRange(mementry{Key: lo}, mementry{Key: hi}, func(e mementry) bool {
+	m.tree.AscendRange(mementry{key: lo}, mementry{key: hi}, func(e mementry) bool {
 		entries = append(entries, e)
 		return true
 	})

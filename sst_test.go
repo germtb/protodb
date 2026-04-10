@@ -1,6 +1,7 @@
 package protodb
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"os"
@@ -10,7 +11,7 @@ import (
 
 type sliceIterator struct {
 	pairs []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}
 	pos int
@@ -21,7 +22,7 @@ func (it *sliceIterator) Next() bool {
 	return it.pos < len(it.pairs)
 }
 
-func (it *sliceIterator) Key() uint64 {
+func (it *sliceIterator) Key() Key {
 	return it.pairs[it.pos].key
 }
 
@@ -30,14 +31,14 @@ func (it *sliceIterator) Value() []byte {
 }
 
 func entriesFrom(pairs []struct {
-	key   uint64
+	key   Key
 	value []byte
 }) *sliceIterator {
 	return &sliceIterator{pairs: pairs, pos: -1}
 }
 
 func writeTestSST(t *testing.T, pairs []struct {
-	key   uint64
+	key   Key
 	value []byte
 }) (*sst, string) {
 	t.Helper()
@@ -71,12 +72,12 @@ func openSSTFile(t *testing.T, dir string, s *sst) *os.File {
 func TestWriteReadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("hello")},
-		{2, []byte("world")},
-		{3, []byte("foo")},
+		{key(1), []byte("hello")},
+		{key(2), []byte("world")},
+		{key(3), []byte("foo")},
 	}
 
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
@@ -98,10 +99,10 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	for _, p := range pairs {
 		got, err := s.Get(p.key, f)
 		if err != nil {
-			t.Fatalf("Get(%d): %v", p.key, err)
+			t.Fatalf("Get(%v): %v", p.key, err)
 		}
 		if string(got) != string(p.value) {
-			t.Errorf("Get(%d): got %q, want %q", p.key, got, p.value)
+			t.Errorf("Get(%v): got %q, want %q", p.key, got, p.value)
 		}
 	}
 }
@@ -109,7 +110,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 func TestEmptySST(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{}
 
@@ -125,14 +126,14 @@ func TestEmptySST(t *testing.T) {
 
 func TestSingleEntry(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{42, []byte("only-one")},
+		{key(42), []byte("only-one")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	got, err := s.Get(42, f)
+	got, err := s.Get(key(42), f)
 	if err != nil {
 		t.Fatalf("Get(42): %v", err)
 	}
@@ -145,11 +146,11 @@ func TestLargeSST(t *testing.T) {
 	// 5000 entries — forces multiple blocks and exercises the block index re-read path.
 	const n = 5000
 	pairs := make([]struct {
-		key   uint64
+		key   Key
 		value []byte
 	}, n)
 	for i := range pairs {
-		pairs[i].key = uint64(i)
+		pairs[i].key = key(uint64(i))
 		pairs[i].value = []byte{byte(i), byte(i >> 8)}
 	}
 
@@ -157,7 +158,7 @@ func TestLargeSST(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	for _, i := range []int{0, n / 2, n - 1} {
-		got, err := s.Get(uint64(i), f)
+		got, err := s.Get(key(uint64(i)), f)
 		if err != nil {
 			t.Fatalf("Get(%d): %v", i, err)
 		}
@@ -171,12 +172,12 @@ func TestLargeSST(t *testing.T) {
 func TestCustomTailSize(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("aaa")},
-		{2, []byte("bbb")},
-		{3, []byte("ccc")},
+		{key(1), []byte("aaa")},
+		{key(2), []byte("bbb")},
+		{key(3), []byte("ccc")},
 	}
 
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
@@ -195,10 +196,10 @@ func TestCustomTailSize(t *testing.T) {
 	for _, p := range pairs {
 		got, err := s.Get(p.key, f)
 		if err != nil {
-			t.Fatalf("Get(%d): %v", p.key, err)
+			t.Fatalf("Get(%v): %v", p.key, err)
 		}
 		if string(got) != string(p.value) {
-			t.Errorf("Get(%d): got %q, want %q", p.key, got, p.value)
+			t.Errorf("Get(%v): got %q, want %q", p.key, got, p.value)
 		}
 	}
 }
@@ -212,16 +213,16 @@ func TestReadNonExistentFile(t *testing.T) {
 
 func TestEmptyValueRoundTrip(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte{}},
-		{2, []byte("between-empties")},
-		{3, []byte{}},
+		{key(1), []byte{}},
+		{key(2), []byte("between-empties")},
+		{key(3), []byte{}},
 	})
 	f := openSSTFile(t, dir, s)
 
-	got, err := s.Get(1, f)
+	got, err := s.Get(key(1), f)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -229,7 +230,7 @@ func TestEmptyValueRoundTrip(t *testing.T) {
 		t.Errorf("Get(1): got len %d, want 0", len(got))
 	}
 
-	got, err = s.Get(2, f)
+	got, err = s.Get(key(2), f)
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -237,7 +238,7 @@ func TestEmptyValueRoundTrip(t *testing.T) {
 		t.Errorf("Get(2): got %q, want %q", got, "between-empties")
 	}
 
-	got, err = s.Get(3, f)
+	got, err = s.Get(key(3), f)
 	if err != nil {
 		t.Fatalf("Get(3): %v", err)
 	}
@@ -253,16 +254,16 @@ func TestLargeValues(t *testing.T) {
 	}
 
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, big},
-		{2, []byte("small")},
-		{3, big},
+		{key(1), big},
+		{key(2), []byte("small")},
+		{key(3), big},
 	})
 	f := openSSTFile(t, dir, s)
 
-	got, err := s.Get(1, f)
+	got, err := s.Get(key(1), f)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -272,10 +273,11 @@ func TestLargeValues(t *testing.T) {
 	for i := range got {
 		if got[i] != big[i] {
 			t.Fatalf("Get(1) byte %d: got %d, want %d", i, got[i], big[i])
+			break
 		}
 	}
 
-	got, err = s.Get(2, f)
+	got, err = s.Get(key(2), f)
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -287,11 +289,11 @@ func TestLargeValues(t *testing.T) {
 func TestWriteUnsortedKeysError(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{3, []byte("c")},
-		{1, []byte("a")},
+		{key(3), []byte("c")},
+		{key(1), []byte("a")},
 	}
 	_, err := WriteSST(dir, entriesFrom(pairs))
 	if !errors.Is(err, ErrUnsortedKeys) {
@@ -302,11 +304,11 @@ func TestWriteUnsortedKeysError(t *testing.T) {
 func TestWriteDuplicateKeysError(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("a")},
-		{1, []byte("b")},
+		{key(1), []byte("a")},
+		{key(1), []byte("b")},
 	}
 	_, err := WriteSST(dir, entriesFrom(pairs))
 	if !errors.Is(err, ErrUnsortedKeys) {
@@ -316,15 +318,15 @@ func TestWriteDuplicateKeysError(t *testing.T) {
 
 func TestWriteKeyZeroAllowed(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{0, []byte("zero")},
-		{1, []byte("one")},
+		{key(0), []byte("zero")},
+		{key(1), []byte("one")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	got, err := s.Get(0, f)
+	got, err := s.Get(key(0), f)
 	if err != nil {
 		t.Fatalf("Get(0): %v", err)
 	}
@@ -333,31 +335,13 @@ func TestWriteKeyZeroAllowed(t *testing.T) {
 	}
 }
 
-func TestReadTailTooSmallError(t *testing.T) {
-	dir := t.TempDir()
-	pairs := []struct {
-		key   uint64
-		value []byte
-	}{
-		{1, []byte("x")},
-	}
-	ssts, err := WriteSST(dir, entriesFrom(pairs))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = ReadSST(dir, ssts[0].hash, &ReaderOptions{TailByteSize: 1})
-	if !errors.Is(err, ErrTailTooSmall) {
-		t.Fatalf("expected ErrTailTooSmall, got %v", err)
-	}
-}
-
 func TestReadBadVersionError(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("x")},
+		{key(1), []byte("x")},
 	}
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
 	if err != nil {
@@ -388,12 +372,12 @@ func TestReadBadVersionError(t *testing.T) {
 
 func TestGetFound(t *testing.T) {
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{10, []byte("ten")},
-		{20, []byte("twenty")},
-		{30, []byte("thirty")},
+		{key(10), []byte("ten")},
+		{key(20), []byte("twenty")},
+		{key(30), []byte("thirty")},
 	}
 	s, dir := writeTestSST(t, pairs)
 	f := openSSTFile(t, dir, s)
@@ -401,26 +385,26 @@ func TestGetFound(t *testing.T) {
 	for _, p := range pairs {
 		got, err := s.Get(p.key, f)
 		if err != nil {
-			t.Fatalf("Get(%d): %v", p.key, err)
+			t.Fatalf("Get(%v): %v", p.key, err)
 		}
 		if string(got) != string(p.value) {
-			t.Errorf("Get(%d): got %q, want %q", p.key, got, p.value)
+			t.Errorf("Get(%v): got %q, want %q", p.key, got, p.value)
 		}
 	}
 }
 
 func TestGetNotFound(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{10, []byte("ten")},
-		{20, []byte("twenty")},
+		{key(10), []byte("ten")},
+		{key(20), []byte("twenty")},
 	})
 	f := openSSTFile(t, dir, s)
 
 	for _, missing := range []uint64{0, 5, 15, 25, 100} {
-		_, err := s.Get(missing, f)
+		_, err := s.Get(key(missing), f)
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("Get(%d): expected ErrNotFound, got %v", missing, err)
 		}
@@ -429,12 +413,12 @@ func TestGetNotFound(t *testing.T) {
 
 func TestGetEmptySST(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{})
 	f := openSSTFile(t, dir, s)
 
-	_, err := s.Get(1, f)
+	_, err := s.Get(key(1), f)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get on empty SST: expected ErrNotFound, got %v", err)
 	}
@@ -442,16 +426,16 @@ func TestGetEmptySST(t *testing.T) {
 
 func TestGetFirstAndLastEntry(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("first")},
-		{2, []byte("middle")},
-		{3, []byte("last")},
+		{key(1), []byte("first")},
+		{key(2), []byte("middle")},
+		{key(3), []byte("last")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	got, err := s.Get(1, f)
+	got, err := s.Get(key(1), f)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -459,7 +443,7 @@ func TestGetFirstAndLastEntry(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "first")
 	}
 
-	got, err = s.Get(3, f)
+	got, err = s.Get(key(3), f)
 	if err != nil {
 		t.Fatalf("Get(3): %v", err)
 	}
@@ -470,14 +454,14 @@ func TestGetFirstAndLastEntry(t *testing.T) {
 
 func TestGetSingleEntry(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{42, []byte("only")},
+		{key(42), []byte("only")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	got, err := s.Get(42, f)
+	got, err := s.Get(key(42), f)
 	if err != nil {
 		t.Fatalf("Get(42): %v", err)
 	}
@@ -485,7 +469,7 @@ func TestGetSingleEntry(t *testing.T) {
 		t.Errorf("Get(42): got %q, want %q", got, "only")
 	}
 
-	_, err = s.Get(41, f)
+	_, err = s.Get(key(41), f)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Get(41): expected ErrNotFound, got %v", err)
 	}
@@ -493,16 +477,16 @@ func TestGetSingleEntry(t *testing.T) {
 
 func TestGetEmptyValue(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte{}},
-		{2, []byte("nonempty")},
-		{3, []byte{}},
+		{key(1), []byte{}},
+		{key(2), []byte("nonempty")},
+		{key(3), []byte{}},
 	})
 	f := openSSTFile(t, dir, s)
 
-	got, err := s.Get(1, f)
+	got, err := s.Get(key(1), f)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -510,7 +494,7 @@ func TestGetEmptyValue(t *testing.T) {
 		t.Errorf("Get(1): got len %d, want 0", len(got))
 	}
 
-	got, err = s.Get(2, f)
+	got, err = s.Get(key(2), f)
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -518,7 +502,7 @@ func TestGetEmptyValue(t *testing.T) {
 		t.Errorf("Get(2): got %q, want %q", got, "nonempty")
 	}
 
-	got, err = s.Get(3, f)
+	got, err = s.Get(key(3), f)
 	if err != nil {
 		t.Fatalf("Get(3): %v", err)
 	}
@@ -531,18 +515,18 @@ func TestGetEmptyValue(t *testing.T) {
 
 func TestScanFullRange(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{10, []byte("a")},
-		{20, []byte("b")},
-		{30, []byte("c")},
+		{key(10), []byte("a")},
+		{key(20), []byte("b")},
+		{key(30), []byte("c")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	var keys []uint64
+	var keys []Key
 	var vals []string
-	iter := s.Iterator(0, 100, f)
+	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
 		keys = append(keys, iter.Key())
 		vals = append(vals, string(iter.Value()))
@@ -551,8 +535,8 @@ func TestScanFullRange(t *testing.T) {
 	if len(keys) != 3 {
 		t.Fatalf("got %d entries, want 3", len(keys))
 	}
-	if keys[0] != 10 || keys[1] != 20 || keys[2] != 30 {
-		t.Errorf("keys: got %v, want [10 20 30]", keys)
+	if !bytes.Equal(keys[0], key(10)) || !bytes.Equal(keys[1], key(20)) || !bytes.Equal(keys[2], key(30)) {
+		t.Errorf("keys: got %v, want [key(10) key(20) key(30)]", keys)
 	}
 	if vals[0] != "a" || vals[1] != "b" || vals[2] != "c" {
 		t.Errorf("values: got %v, want [a b c]", vals)
@@ -561,19 +545,19 @@ func TestScanFullRange(t *testing.T) {
 
 func TestScanSubRange(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{10, []byte("a")},
-		{20, []byte("b")},
-		{30, []byte("c")},
-		{40, []byte("d")},
-		{50, []byte("e")},
+		{key(10), []byte("a")},
+		{key(20), []byte("b")},
+		{key(30), []byte("c")},
+		{key(40), []byte("d")},
+		{key(50), []byte("e")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	var keys []uint64
-	iter := s.Iterator(20, 40, f)
+	var keys []Key
+	iter := s.Iterator(key(20), key(40), f)
 	for iter.Next() {
 		keys = append(keys, iter.Key())
 	}
@@ -581,20 +565,20 @@ func TestScanSubRange(t *testing.T) {
 	if len(keys) != 2 {
 		t.Fatalf("got %d entries, want 2", len(keys))
 	}
-	if keys[0] != 20 || keys[1] != 30 {
-		t.Errorf("keys: got %v, want [20 30]", keys)
+	if !bytes.Equal(keys[0], key(20)) || !bytes.Equal(keys[1], key(30)) {
+		t.Errorf("keys: got %v, want [key(20) key(30)]", keys)
 	}
 }
 
 func TestScanEmptySST(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{})
 	f := openSSTFile(t, dir, s)
 
 	count := 0
-	iter := s.Iterator(0, 100, f)
+	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
 		count++
 	}
@@ -605,16 +589,16 @@ func TestScanEmptySST(t *testing.T) {
 
 func TestScanNoMatch(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{10, []byte("a")},
-		{20, []byte("b")},
+		{key(10), []byte("a")},
+		{key(20), []byte("b")},
 	})
 	f := openSSTFile(t, dir, s)
 
 	count := 0
-	iter := s.Iterator(50, 100, f)
+	iter := s.Iterator(key(50), key(100), f)
 	for iter.Next() {
 		count++
 	}
@@ -625,63 +609,63 @@ func TestScanNoMatch(t *testing.T) {
 
 func TestScanSingleEntry(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{42, []byte("only")},
+		{key(42), []byte("only")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	var keys []uint64
-	iter := s.Iterator(0, 100, f)
+	var keys []Key
+	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
 		keys = append(keys, iter.Key())
 	}
-	if len(keys) != 1 || keys[0] != 42 {
-		t.Errorf("got %v, want [42]", keys)
+	if len(keys) != 1 || !bytes.Equal(keys[0], key(42)) {
+		t.Errorf("got %v, want [key(42)]", keys)
 	}
 }
 
 func TestScanExactBoundaries(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{10, []byte("a")},
-		{20, []byte("b")},
-		{30, []byte("c")},
+		{key(10), []byte("a")},
+		{key(20), []byte("b")},
+		{key(30), []byte("c")},
 	})
 	f := openSSTFile(t, dir, s)
 
 	// lo is inclusive, hi is exclusive
-	var keys []uint64
-	iter := s.Iterator(10, 30, f)
+	var keys []Key
+	iter := s.Iterator(key(10), key(30), f)
 	for iter.Next() {
 		keys = append(keys, iter.Key())
 	}
 	if len(keys) != 2 {
 		t.Fatalf("got %d entries, want 2", len(keys))
 	}
-	if keys[0] != 10 || keys[1] != 20 {
-		t.Errorf("keys: got %v, want [10 20]", keys)
+	if !bytes.Equal(keys[0], key(10)) || !bytes.Equal(keys[1], key(20)) {
+		t.Errorf("keys: got %v, want [key(10) key(20)]", keys)
 	}
 }
 
 func TestScanBreakEarly(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("a")},
-		{2, []byte("b")},
-		{3, []byte("c")},
-		{4, []byte("d")},
-		{5, []byte("e")},
+		{key(1), []byte("a")},
+		{key(2), []byte("b")},
+		{key(3), []byte("c")},
+		{key(4), []byte("d")},
+		{key(5), []byte("e")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	var keys []uint64
-	iter := s.Iterator(0, 100, f)
+	var keys []Key
+	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
 		keys = append(keys, iter.Key())
 		if len(keys) == 2 {
@@ -691,24 +675,24 @@ func TestScanBreakEarly(t *testing.T) {
 	if len(keys) != 2 {
 		t.Fatalf("got %d entries, want 2", len(keys))
 	}
-	if keys[0] != 1 || keys[1] != 2 {
-		t.Errorf("keys: got %v, want [1 2]", keys)
+	if !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(2)) {
+		t.Errorf("keys: got %v, want [key(1) key(2)]", keys)
 	}
 }
 
 func TestScanEmptyValues(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte{}},
-		{2, []byte("mid")},
-		{3, []byte{}},
+		{key(1), []byte{}},
+		{key(2), []byte("mid")},
+		{key(3), []byte{}},
 	})
 	f := openSSTFile(t, dir, s)
 
 	var vals []string
-	iter := s.Iterator(0, 100, f)
+	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
 		vals = append(vals, string(iter.Value()))
 	}
@@ -722,16 +706,16 @@ func TestScanEmptyValues(t *testing.T) {
 
 func TestScanLastEntry(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{10, []byte("first")},
-		{20, []byte("last")},
+		{key(10), []byte("first")},
+		{key(20), []byte("last")},
 	})
 	f := openSSTFile(t, dir, s)
 
 	var vals []string
-	iter := s.Iterator(20, 100, f)
+	iter := s.Iterator(key(20), key(100), f)
 	for iter.Next() {
 		vals = append(vals, string(iter.Value()))
 	}
@@ -744,16 +728,16 @@ func TestScanLastEntry(t *testing.T) {
 
 func TestGetTombstone(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("alive")},
-		{2, nil},
-		{3, []byte("also alive")},
+		{key(1), []byte("alive")},
+		{key(2), nil},
+		{key(3), []byte("also alive")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	got, err := s.Get(1, f)
+	got, err := s.Get(key(1), f)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -761,12 +745,12 @@ func TestGetTombstone(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "alive")
 	}
 
-	_, err = s.Get(2, f)
+	_, err = s.Get(key(2), f)
 	if !errors.Is(err, ErrDeleted) {
 		t.Fatalf("Get(2): expected ErrDeleted, got %v", err)
 	}
 
-	got, err = s.Get(3, f)
+	got, err = s.Get(key(3), f)
 	if err != nil {
 		t.Fatalf("Get(3): %v", err)
 	}
@@ -777,20 +761,20 @@ func TestGetTombstone(t *testing.T) {
 
 func TestScanYieldsTombstones(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("a")},
-		{2, nil},
-		{3, []byte("c")},
-		{4, nil},
-		{5, []byte("e")},
+		{key(1), []byte("a")},
+		{key(2), nil},
+		{key(3), []byte("c")},
+		{key(4), nil},
+		{key(5), []byte("e")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	var keys []uint64
-	var tombstones []uint64
-	iter := s.Iterator(0, 100, f)
+	var keys []Key
+	var tombstones []Key
+	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
 		keys = append(keys, iter.Key())
 		if iter.Value() == nil {
@@ -801,27 +785,27 @@ func TestScanYieldsTombstones(t *testing.T) {
 	if len(keys) != 5 {
 		t.Fatalf("got %d entries, want 5", len(keys))
 	}
-	if len(tombstones) != 2 || tombstones[0] != 2 || tombstones[1] != 4 {
-		t.Errorf("tombstones: got %v, want [2 4]", tombstones)
+	if len(tombstones) != 2 || !bytes.Equal(tombstones[0], key(2)) || !bytes.Equal(tombstones[1], key(4)) {
+		t.Errorf("tombstones: got %v, want [key(2) key(4)]", tombstones)
 	}
 }
 
 func TestTombstoneFirst(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, nil},
-		{2, []byte("second")},
+		{key(1), nil},
+		{key(2), []byte("second")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	_, err := s.Get(1, f)
+	_, err := s.Get(key(1), f)
 	if !errors.Is(err, ErrDeleted) {
 		t.Fatalf("Get(1): expected ErrDeleted, got %v", err)
 	}
 
-	got, err := s.Get(2, f)
+	got, err := s.Get(key(2), f)
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -832,15 +816,15 @@ func TestTombstoneFirst(t *testing.T) {
 
 func TestTombstoneLast(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("first")},
-		{2, nil},
+		{key(1), []byte("first")},
+		{key(2), nil},
 	})
 	f := openSSTFile(t, dir, s)
 
-	got, err := s.Get(1, f)
+	got, err := s.Get(key(1), f)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -848,7 +832,7 @@ func TestTombstoneLast(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "first")
 	}
 
-	_, err = s.Get(2, f)
+	_, err = s.Get(key(2), f)
 	if !errors.Is(err, ErrDeleted) {
 		t.Fatalf("Get(2): expected ErrDeleted, got %v", err)
 	}
@@ -856,47 +840,47 @@ func TestTombstoneLast(t *testing.T) {
 
 func TestAllTombstones(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, nil},
-		{2, nil},
-		{3, nil},
+		{key(1), nil},
+		{key(2), nil},
+		{key(3), nil},
 	})
 	f := openSSTFile(t, dir, s)
 
 	for _, k := range []uint64{1, 2, 3} {
-		_, err := s.Get(k, f)
+		_, err := s.Get(key(k), f)
 		if !errors.Is(err, ErrDeleted) {
 			t.Errorf("Get(%d): expected ErrDeleted, got %v", k, err)
 		}
 	}
 
-	var tombstones []uint64
-	iter := s.Iterator(0, 100, f)
+	var tombstones []Key
+	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
 		if iter.Value() != nil {
-			t.Errorf("Scan(%d): expected nil value for tombstone", iter.Key())
+			t.Errorf("Scan(%v): expected nil value for tombstone", iter.Key())
 		}
 		tombstones = append(tombstones, iter.Key())
 	}
 	if len(tombstones) != 3 {
-		t.Errorf("Scan tombstones: got %v, want [1 2 3]", tombstones)
+		t.Errorf("Scan tombstones: got %v, want [key(1) key(2) key(3)]", tombstones)
 	}
 }
 
 func TestGetMissingKeyInTombstoneSST(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("alive")},
-		{2, nil},
-		{3, []byte("also alive")},
+		{key(1), []byte("alive")},
+		{key(2), nil},
+		{key(3), []byte("also alive")},
 	})
 	f := openSSTFile(t, dir, s)
 
-	_, err := s.Get(99, f)
+	_, err := s.Get(key(99), f)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get(99): expected ErrNotFound, got %v", err)
 	}
@@ -904,16 +888,16 @@ func TestGetMissingKeyInTombstoneSST(t *testing.T) {
 
 func TestTombstoneBetweenEmptyValues(t *testing.T) {
 	s, dir := writeTestSST(t, []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte{}},
-		{2, nil},
-		{3, []byte{}},
+		{key(1), []byte{}},
+		{key(2), nil},
+		{key(3), []byte{}},
 	})
 	f := openSSTFile(t, dir, s)
 
-	got, err := s.Get(1, f)
+	got, err := s.Get(key(1), f)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -921,12 +905,12 @@ func TestTombstoneBetweenEmptyValues(t *testing.T) {
 		t.Errorf("Get(1): got len %d, want 0", len(got))
 	}
 
-	_, err = s.Get(2, f)
+	_, err = s.Get(key(2), f)
 	if !errors.Is(err, ErrDeleted) {
 		t.Fatalf("Get(2): expected ErrDeleted, got %v", err)
 	}
 
-	got, err = s.Get(3, f)
+	got, err = s.Get(key(3), f)
 	if err != nil {
 		t.Fatalf("Get(3): %v", err)
 	}

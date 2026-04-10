@@ -10,30 +10,33 @@ import (
 
 // WAL frame layout:
 //
-// ┌───────────────┬───────────┬──────────┬──────────┬───────────┐
-// │ frame_len u32 │ crc32 u32 │ key u64  │ len u64  │ value     │
-// └───────────────┴───────────┴──────────┴──────────┴───────────┘
+// ┌───────────┬──────────────┬─────┬──────────────┬───────┐
+// │ crc32 u32 │ key_len u32  │ key │ value_len u32│ value │
+// └───────────┴──────────────┴─────┴──────────────┴───────┘
 //
-// frame_len: size of everything after frame_len (crc32 + key + len + value)
-// crc32:     checksum of (key + len + value)
-// len:       byte length of value, or tombstone (^uint64(0)) for deletes
+// crc32:     checksum of (key_len + key + value_len + value)
+// value_len: byte length of value, or tombstone (0xFFFFFFFF) for deletes
 //
 // On replay, a frame with a bad checksum or short read stops replay.
 // The file is truncated to the end of the last valid frame.
 
-const walHeaderSize = 4 + 4     // frame_len + crc32
-const walEntryFixedSize = 8 + 8 // key + len
-const walTombstone uint64 = ^uint64(0)
+const walChecksumSize = 4
+const keyLenSize = 4
+const valueLenSize = 4
+const walTombstone uint32 = 0xFFFFFFFF
 
 type WAL struct {
-	path   string
-	handle *os.File
+	path       string
+	handle     *os.File
+	buf        bytes.Buffer
+	bufferSize int
 }
 
-func newWAL(path string) (*WAL, error) {
+func newWAL(path string, bufferSize int) (*WAL, error) {
 	return &WAL{
-		path:   path,
-		handle: nil,
+		path:       path,
+		handle:     nil,
+		bufferSize: bufferSize,
 	}, nil
 }
 
@@ -49,56 +52,91 @@ func (wal *WAL) open() error {
 	return nil
 }
 
-func (wal *WAL) Append(key uint64, value []byte) error {
-	if err := wal.open(); err != nil {
+func (wal *WAL) flush() error {
+	if wal.buf.Len() == 0 {
+		return nil
+	}
+	err := wal.open()
+	if err != nil {
 		return err
 	}
-
-	var buf bytes.Buffer
-	writeFrame(&buf, key, value)
-	return wal.Write(buf.Bytes())
-}
-
-func writeFrame(buf *bytes.Buffer, key uint64, value []byte) {
-	var valueLen uint64
-	if value == nil {
-		valueLen = walTombstone
-	} else {
-		valueLen = uint64(len(value))
-	}
-
-	payloadSize := walEntryFixedSize + len(value)
-
-	// Reserve space for header, write payload directly into buffer
-	headerStart := buf.Len()
-	buf.Grow(walHeaderSize + payloadSize)
-	buf.Write(make([]byte, walHeaderSize)) // placeholder for header
-
-	// Write payload directly into the buffer
-	var fixed [walEntryFixedSize]byte
-	binary.BigEndian.PutUint64(fixed[0:8], key)
-	binary.BigEndian.PutUint64(fixed[8:16], valueLen)
-	buf.Write(fixed[:])
-	if value != nil {
-		buf.Write(value)
-	}
-
-	// Compute checksum over the payload we just wrote
-	payload := buf.Bytes()[headerStart+walHeaderSize:]
-	frame := buf.Bytes()[headerStart:]
-	binary.BigEndian.PutUint32(frame[0:4], uint32(4+payloadSize))
-	binary.BigEndian.PutUint32(frame[4:8], crc32.ChecksumIEEE(payload))
-}
-
-func (wal *WAL) Write(data []byte) error {
-	if err := wal.open(); err != nil {
-		return err
-	}
-	_, err := wal.handle.Write(data)
+	_, err = wal.handle.Write(wal.buf.Bytes())
+	wal.buf.Reset()
 	return err
 }
 
+type WALBatch struct {
+	wal      *WAL
+	buf      bytes.Buffer
+	byteSize int
+}
+
+func (wal *WAL) Batch() WALBatch {
+	return WALBatch{wal: wal}
+}
+
+func (batch *WALBatch) Put(key Key, value []byte) {
+	writeFrame(&batch.buf, key, value)
+	batch.byteSize += len(key) + len(value)
+}
+
+func (batch *WALBatch) Delete(key Key) {
+	writeFrame(&batch.buf, key, nil)
+	batch.byteSize += len(key)
+}
+
+func (batch *WALBatch) Commit() error {
+	return batch.wal.Write(batch.buf.Bytes())
+}
+
+func (wal *WAL) Append(key Key, value []byte) error {
+	batch := wal.Batch()
+	batch.Put(key, value)
+	return batch.Commit()
+}
+
+func writeFrame(buf *bytes.Buffer, key Key, value []byte) {
+	var valueLen uint32
+	if value == nil {
+		valueLen = walTombstone
+	} else {
+		valueLen = uint32(len(value))
+	}
+
+	frameSize := walChecksumSize + keyLenSize + len(key) + valueLenSize + len(value)
+	frame := make([]byte, frameSize)
+
+	// Build payload: key_len | key | value_len | value
+	pos := walChecksumSize
+	binary.BigEndian.PutUint32(frame[pos:], uint32(len(key)))
+	pos += 4
+	copy(frame[pos:], key)
+	pos += len(key)
+	binary.BigEndian.PutUint32(frame[pos:], valueLen)
+	pos += 4
+	if value != nil {
+		copy(frame[pos:], value)
+	}
+
+	// Compute checksum over payload and write it at the start
+	binary.BigEndian.PutUint32(frame[0:4], crc32.ChecksumIEEE(frame[walChecksumSize:]))
+
+	buf.Write(frame)
+}
+
+func (wal *WAL) Write(data []byte) error {
+	wal.buf.Write(data)
+	if wal.buf.Len() >= wal.bufferSize {
+		return wal.flush()
+	}
+	return nil
+}
+
 func (wal *WAL) Sync() error {
+	err := wal.flush()
+	if err != nil {
+		return err
+	}
 	if wal.handle == nil {
 		return nil
 	}
@@ -106,26 +144,33 @@ func (wal *WAL) Sync() error {
 }
 
 func (wal *WAL) Clear() error {
+	wal.buf.Reset()
 	if wal.handle == nil {
 		return nil
 	}
-	if err := wal.handle.Truncate(0); err != nil {
+	err := wal.handle.Truncate(0)
+	if err != nil {
 		return err
 	}
-	_, err := wal.handle.Seek(0, 0)
+	_, err = wal.handle.Seek(0, 0)
 	return err
 }
 
 func (wal *WAL) Close() error {
+	err := wal.flush()
+	if err != nil {
+		return err
+	}
 	if wal.handle == nil {
 		return nil
 	}
-	err := wal.handle.Close()
+	err = wal.handle.Close()
 	wal.handle = nil
 	return err
 }
 
 func (wal *WAL) Drop() error {
+	wal.buf.Reset()
 	if wal.handle == nil {
 		return nil
 	}
@@ -146,44 +191,66 @@ func (wal *WAL) replay(table *memtable) error {
 	var lastGoodOffset int64
 
 	for {
-		// Read frame header
-		var frameLen uint32
-		var checksum uint32
-		if err := binary.Read(reader, binary.BigEndian, &frameLen); err != nil {
+		// Read checksum
+		var checksumBuf [4]byte
+		if _, err := io.ReadFull(reader, checksumBuf[:]); err != nil {
 			break // EOF
 		}
-		if err := binary.Read(reader, binary.BigEndian, &checksum); err != nil {
-			break // truncated header
+		checksum := binary.BigEndian.Uint32(checksumBuf[:])
+
+		// Mark start of payload for checksum verification
+		payloadStart := int64(len(data)) - int64(reader.Len())
+
+		// Read key_len
+		var scratch [4]byte
+		if _, err := io.ReadFull(reader, scratch[:]); err != nil {
+			break // truncated
+		}
+		keyLen := binary.BigEndian.Uint32(scratch[:])
+
+		// Read key
+		if int64(reader.Len()) < int64(keyLen)+4 {
+			break // truncated
+		}
+		key := make([]byte, keyLen)
+		if _, err := io.ReadFull(reader, key); err != nil {
+			break
 		}
 
-		// Read payload (frameLen includes the 4-byte checksum we already read)
-		payloadSize := int(frameLen) - 4
-		if payloadSize < walEntryFixedSize {
-			break // corrupt frame length
+		// Read value_len
+		if _, err := io.ReadFull(reader, scratch[:]); err != nil {
+			break // truncated
+		}
+		valueLen := binary.BigEndian.Uint32(scratch[:])
+
+		// Read value
+		var value []byte
+		if valueLen == walTombstone {
+			// tombstone, no value bytes
+		} else {
+			if int64(reader.Len()) < int64(valueLen) {
+				break // truncated
+			}
+			value = make([]byte, valueLen)
+			if _, err := io.ReadFull(reader, value); err != nil {
+				break
+			}
 		}
 
-		payload := make([]byte, payloadSize)
-		if _, err := io.ReadFull(reader, payload); err != nil {
-			break // truncated payload
-		}
-
-		// Verify checksum
+		// Verify checksum over the payload
+		payloadEnd := int64(len(data)) - int64(reader.Len())
+		payload := data[payloadStart:payloadEnd]
 		if crc32.ChecksumIEEE(payload) != checksum {
 			break // corrupt frame
 		}
 
-		// Parse entry
-		key := binary.BigEndian.Uint64(payload[0:8])
-		valueLen := binary.BigEndian.Uint64(payload[8:16])
-
 		if valueLen == walTombstone {
 			table.Delete(key)
 		} else {
-			value := payload[16:]
 			table.Put(key, value)
 		}
 
-		lastGoodOffset = int64(len(data)) - int64(reader.Len())
+		lastGoodOffset = payloadEnd
 	}
 
 	// Truncate to last good frame to clean up any partial write

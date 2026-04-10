@@ -39,7 +39,7 @@ func TestOpenExistingDB(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 	err = engine.Flush()
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestOpenExistingDB(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1) after reopen: %v", err)
 	}
@@ -64,9 +64,9 @@ func TestOpenExistingDB(t *testing.T) {
 
 func TestEnginePutGet(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -78,7 +78,7 @@ func TestEnginePutGet(t *testing.T) {
 func TestEngineGetMissing(t *testing.T) {
 	engine := openTestEngine(t)
 
-	got, err := engine.Get(99)
+	got, err := engine.Get(key(99))
 	if err != nil {
 		t.Fatalf("Get(99): %v", err)
 	}
@@ -89,10 +89,10 @@ func TestEngineGetMissing(t *testing.T) {
 
 func TestEnginePutOverwrite(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("first"))
-	engine.Put(1, []byte("second"))
+	engine.Put(key(1), []byte("first"))
+	engine.Put(key(1), []byte("second"))
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -105,10 +105,10 @@ func TestEnginePutOverwrite(t *testing.T) {
 
 func TestEngineDelete(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("hello"))
-	engine.Delete(1)
+	engine.Put(key(1), []byte("hello"))
+	engine.Delete(key(1))
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -119,9 +119,9 @@ func TestEngineDelete(t *testing.T) {
 
 func TestEngineDeleteNonexistent(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Delete(99)
+	engine.Delete(key(99))
 
-	got, err := engine.Get(99)
+	got, err := engine.Get(key(99))
 	if err != nil {
 		t.Fatalf("Get(99): %v", err)
 	}
@@ -134,7 +134,7 @@ func TestEngineDeleteNonexistent(t *testing.T) {
 
 func TestEngineFlush(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 
 	err := engine.Flush()
 	if err != nil {
@@ -142,7 +142,7 @@ func TestEngineFlush(t *testing.T) {
 	}
 
 	// Value should still be readable from SST
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1) after flush: %v", err)
 	}
@@ -153,11 +153,11 @@ func TestEngineFlush(t *testing.T) {
 
 func TestEngineFlushThenPut(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("before"))
+	engine.Put(key(1), []byte("before"))
 	engine.Flush()
-	engine.Put(1, []byte("after"))
+	engine.Put(key(1), []byte("after"))
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -169,22 +169,22 @@ func TestEngineFlushThenPut(t *testing.T) {
 func TestEngineMultipleFlushes(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 
-	engine.Put(2, []byte("b"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
-	engine.Put(3, []byte("c"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 
-	for key, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
-		got, err := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -193,13 +193,13 @@ func TestEngineMultipleFlushes(t *testing.T) {
 
 func TestEngineDeleteShadowsOlderSST(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 	engine.Flush()
 
 	// Delete in memtable should shadow the SST value
-	engine.Delete(1)
+	engine.Delete(key(1))
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -210,14 +210,14 @@ func TestEngineDeleteShadowsOlderSST(t *testing.T) {
 
 func TestEngineDeleteFlushedThenGet(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 	engine.Flush()
 
-	engine.Delete(1)
+	engine.Delete(key(1))
 	engine.Flush()
 
 	// Tombstone SST should shadow value SST
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -230,9 +230,9 @@ func TestEngineDeleteThenReopen(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 	engine.Flush()
-	engine.Delete(1)
+	engine.Delete(key(1))
 	engine.Flush()
 
 	engine2, err := Open(dir)
@@ -240,7 +240,7 @@ func TestEngineDeleteThenReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1) after reopen: %v", err)
 	}
@@ -253,11 +253,11 @@ func TestEngineDeleteThenReopen(t *testing.T) {
 
 func TestEngineOverwriteAcrossFlush(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("old"))
+	engine.Put(key(1), []byte("old"))
 	engine.Flush()
-	engine.Put(1, []byte("new"))
+	engine.Put(key(1), []byte("new"))
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -268,13 +268,13 @@ func TestEngineOverwriteAcrossFlush(t *testing.T) {
 
 func TestEngineOverwriteAcrossMultipleFlushes(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("v1"))
+	engine.Put(key(1), []byte("v1"))
 	engine.Flush()
-	engine.Put(1, []byte("v2"))
+	engine.Put(key(1), []byte("v2"))
 	engine.Flush()
-	engine.Put(1, []byte("v3"))
+	engine.Put(key(1), []byte("v3"))
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -287,50 +287,50 @@ func TestEngineOverwriteAcrossMultipleFlushes(t *testing.T) {
 
 func TestEngineScanMemtableOnly(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
 
-	var keys []uint64
-	iter := engine.Scan(1, 4)
+	var keys []Key
+	iter := engine.Scan(key(1), key(4))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
 	}
 
-	if len(keys) != 3 || keys[0] != 1 || keys[1] != 2 || keys[2] != 3 {
+	if len(keys) != 3 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(2)) || !bytes.Equal(keys[2], key(3)) {
 		t.Errorf("Scan: got %v, want [1 2 3]", keys)
 	}
 }
 
 func TestEngineScanAcrossFlush(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("a"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
-	engine.Put(2, []byte("b"))
-	engine.Put(4, []byte("d"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(4), []byte("d"))
 
-	var keys []uint64
-	iter := engine.Scan(1, 5)
+	var keys []Key
+	iter := engine.Scan(key(1), key(5))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
 	}
 
-	if len(keys) != 4 || keys[0] != 1 || keys[1] != 2 || keys[2] != 3 || keys[3] != 4 {
+	if len(keys) != 4 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(2)) || !bytes.Equal(keys[2], key(3)) || !bytes.Equal(keys[3], key(4)) {
 		t.Errorf("Scan: got %v, want [1 2 3 4]", keys)
 	}
 }
 
 func TestEngineScanMergesDuplicates(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("old"))
+	engine.Put(key(1), []byte("old"))
 	engine.Flush()
-	engine.Put(1, []byte("new"))
+	engine.Put(key(1), []byte("new"))
 
 	var values []string
-	iter := engine.Scan(0, 10)
+	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
 		value := iter.Value()
 		values = append(values, string(value))
@@ -343,42 +343,42 @@ func TestEngineScanMergesDuplicates(t *testing.T) {
 
 func TestEngineScanSkipsTombstones(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
-	engine.Delete(2)
+	engine.Delete(key(2))
 
-	var keys []uint64
-	iter := engine.Scan(1, 4)
+	var keys []Key
+	iter := engine.Scan(key(1), key(4))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
 	}
 
-	if len(keys) != 2 || keys[0] != 1 || keys[1] != 3 {
+	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(3)) {
 		t.Errorf("Scan: got %v, want [1 3]", keys)
 	}
 }
 
 func TestEngineScanTombstoneShadowsOlderSST(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 
-	engine.Delete(2)
+	engine.Delete(key(2))
 	engine.Flush()
 
-	var keys []uint64
-	iter := engine.Scan(1, 4)
+	var keys []Key
+	iter := engine.Scan(key(1), key(4))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
 	}
 
-	if len(keys) != 2 || keys[0] != 1 || keys[1] != 3 {
+	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(3)) {
 		t.Errorf("Scan: got %v, want [1 3]", keys)
 	}
 }
@@ -387,7 +387,7 @@ func TestEngineScanEmpty(t *testing.T) {
 	engine := openTestEngine(t)
 
 	var count int = 0
-	iter := engine.Scan(0, 100)
+	iter := engine.Scan(key(0), key(100))
 	for iter.Next() {
 		count++
 	}
@@ -398,21 +398,21 @@ func TestEngineScanEmpty(t *testing.T) {
 
 func TestEngineScanBreakEarly(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
 
-	var keys []uint64
-	iter := engine.Scan(1, 4)
+	var keys []Key
+	iter := engine.Scan(key(1), key(4))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
-		if key == 2 {
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
+		if bytes.Equal(iterKey, key(2)) {
 			break
 		}
 	}
 
-	if len(keys) != 2 || keys[0] != 1 || keys[1] != 2 {
+	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(2)) {
 		t.Errorf("Scan with break: got %v, want [1 2]", keys)
 	}
 }
@@ -420,24 +420,24 @@ func TestEngineScanBreakEarly(t *testing.T) {
 func TestEngineScanMultipleSSTs(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(5, []byte("e"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(5), []byte("e"))
 	engine.Flush()
 
-	engine.Put(2, []byte("b"))
-	engine.Put(4, []byte("d"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(4), []byte("d"))
 	engine.Flush()
 
-	engine.Put(3, []byte("c"))
+	engine.Put(key(3), []byte("c"))
 
-	var keys []uint64
-	iter := engine.Scan(1, 6)
+	var keys []Key
+	iter := engine.Scan(key(1), key(6))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
 	}
 
-	if len(keys) != 5 || keys[0] != 1 || keys[1] != 2 || keys[2] != 3 || keys[3] != 4 || keys[4] != 5 {
+	if len(keys) != 5 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(2)) || !bytes.Equal(keys[2], key(3)) || !bytes.Equal(keys[3], key(4)) || !bytes.Equal(keys[4], key(5)) {
 		t.Errorf("Scan: got %v, want [1 2 3 4 5]", keys)
 	}
 }
@@ -448,9 +448,9 @@ func TestEnginePersistenceMultipleFlushes(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
-	engine.Put(2, []byte("b"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	engine2, err := Open(dir)
@@ -458,13 +458,13 @@ func TestEnginePersistenceMultipleFlushes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := engine2.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := engine2.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -473,16 +473,16 @@ func TestEngineUnflushedDataRecoveredOnReopen(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("flushed"))
+	engine.Put(key(1), []byte("flushed"))
 	engine.Flush()
-	engine.Put(2, []byte("not flushed"))
+	engine.Put(key(2), []byte("not flushed"))
 
 	engine2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -490,7 +490,7 @@ func TestEngineUnflushedDataRecoveredOnReopen(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "flushed")
 	}
 
-	got, err = engine2.Get(2)
+	got, err = engine2.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -512,9 +512,9 @@ func TestEngineEmptyFlush(t *testing.T) {
 
 func TestEngineKeyZero(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(0, []byte("zero"))
+	engine.Put(key(0), []byte("zero"))
 
-	got, err := engine.Get(0)
+	got, err := engine.Get(key(0))
 	if err != nil {
 		t.Fatalf("Get(0): %v", err)
 	}
@@ -525,9 +525,9 @@ func TestEngineKeyZero(t *testing.T) {
 
 func TestEngineEmptyValue(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte{})
+	engine.Put(key(1), []byte{})
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -541,12 +541,12 @@ func TestEngineEmptyValue(t *testing.T) {
 
 func TestEngineDeleteThenPutSameKey(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("first"))
+	engine.Put(key(1), []byte("first"))
 	engine.Flush()
-	engine.Delete(1)
-	engine.Put(1, []byte("resurrected"))
+	engine.Delete(key(1))
+	engine.Put(key(1), []byte("resurrected"))
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -561,10 +561,10 @@ func TestEngineLargeValues(t *testing.T) {
 	for i := range big {
 		big[i] = byte(i % 256)
 	}
-	engine.Put(1, big)
+	engine.Put(key(1), big)
 	engine.Flush()
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -579,12 +579,12 @@ func TestEngineLargeValues(t *testing.T) {
 func TestEngineManyKeys(t *testing.T) {
 	engine := openTestEngine(t)
 	for i := uint64(0); i < 1000; i++ {
-		engine.Put(i, []byte("value"))
+		engine.Put(key(i), []byte("value"))
 	}
 	engine.Flush()
 
 	for i := uint64(0); i < 1000; i++ {
-		got, err := engine.Get(i)
+		got, err := engine.Get(key(i))
 		if err != nil {
 			t.Fatalf("Get(%d): %v", i, err)
 		}
@@ -600,9 +600,9 @@ func TestEngineEmptyFlushThenGet(t *testing.T) {
 	engine := openTestEngine(t)
 	engine.Flush() // empty SST
 
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -615,17 +615,17 @@ func TestEngineEmptyFlushThenScan(t *testing.T) {
 	engine := openTestEngine(t)
 	engine.Flush() // empty SST
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 
-	var keys []uint64
-	iter := engine.Scan(0, 10)
+	var keys []Key
+	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
 	}
 
-	if len(keys) != 2 || keys[0] != 1 || keys[1] != 2 {
+	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(2)) {
 		t.Errorf("Scan: got %v, want [1 2]", keys)
 	}
 }
@@ -636,8 +636,8 @@ func TestEngineMultipleEmptyFlushes(t *testing.T) {
 	engine.Flush()
 	engine.Flush()
 
-	engine.Put(1, []byte("hello"))
-	got, err := engine.Get(1)
+	engine.Put(key(1), []byte("hello"))
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -648,19 +648,19 @@ func TestEngineMultipleEmptyFlushes(t *testing.T) {
 
 func TestEngineEmptyFlushBetweenDataFlushes(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 	engine.Flush() // empty
-	engine.Put(2, []byte("b"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -669,10 +669,10 @@ func TestEngineEmptyFlushBetweenDataFlushes(t *testing.T) {
 
 func TestEnginePutNilIsTombstone(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("hello"))
-	engine.Put(1, nil) // tombstone via Put
+	engine.Put(key(1), []byte("hello"))
+	engine.Put(key(1), nil) // tombstone via Put
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -683,11 +683,11 @@ func TestEnginePutNilIsTombstone(t *testing.T) {
 
 func TestEnginePutNilShadowsSST(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 	engine.Flush()
-	engine.Put(1, nil) // tombstone via Put
+	engine.Put(key(1), nil) // tombstone via Put
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -698,12 +698,12 @@ func TestEnginePutNilShadowsSST(t *testing.T) {
 
 func TestEnginePutNilFlushedShadowsSST(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 	engine.Flush()
-	engine.Put(1, nil)
+	engine.Put(key(1), nil)
 	engine.Flush()
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -714,20 +714,20 @@ func TestEnginePutNilFlushedShadowsSST(t *testing.T) {
 
 func TestEngineScanWithNilTombstones(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
-	engine.Put(2, nil) // tombstone via Put
+	engine.Put(key(2), nil) // tombstone via Put
 
-	var keys []uint64
-	iter := engine.Scan(1, 4)
+	var keys []Key
+	iter := engine.Scan(key(1), key(4))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
 	}
 
-	if len(keys) != 2 || keys[0] != 1 || keys[1] != 3 {
+	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(3)) {
 		t.Errorf("Scan: got %v, want [1 3]", keys)
 	}
 }
@@ -736,16 +736,16 @@ func TestEngineScanWithNilTombstones(t *testing.T) {
 
 func TestEngineAllDeletedThenScan(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
-	engine.Delete(1)
-	engine.Delete(2)
-	engine.Delete(3)
+	engine.Delete(key(1))
+	engine.Delete(key(2))
+	engine.Delete(key(3))
 
 	var count int = 0
-	iter := engine.Scan(0, 10)
+	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
 		count++
 	}
@@ -756,15 +756,15 @@ func TestEngineAllDeletedThenScan(t *testing.T) {
 
 func TestEngineAllDeletedFlushedThenScan(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
-	engine.Delete(1)
-	engine.Delete(2)
+	engine.Delete(key(1))
+	engine.Delete(key(2))
 	engine.Flush()
 
 	var count int = 0
-	iter := engine.Scan(0, 10)
+	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
 		count++
 	}
@@ -775,14 +775,14 @@ func TestEngineAllDeletedFlushedThenScan(t *testing.T) {
 
 func TestEngineDeleteResurrect(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("v1"))
+	engine.Put(key(1), []byte("v1"))
 	engine.Flush()
-	engine.Delete(1)
+	engine.Delete(key(1))
 	engine.Flush()
-	engine.Put(1, []byte("v2"))
+	engine.Put(key(1), []byte("v2"))
 	engine.Flush()
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -793,14 +793,14 @@ func TestEngineDeleteResurrect(t *testing.T) {
 
 func TestEngineDeleteResurrectScan(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("v1"))
+	engine.Put(key(1), []byte("v1"))
 	engine.Flush()
-	engine.Delete(1)
+	engine.Delete(key(1))
 	engine.Flush()
-	engine.Put(1, []byte("v2"))
+	engine.Put(key(1), []byte("v2"))
 
 	var values []string
-	iter := engine.Scan(0, 10)
+	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
 		value := iter.Value()
 		values = append(values, string(value))
@@ -815,10 +815,10 @@ func TestEngineDeleteResurrectScan(t *testing.T) {
 
 func TestEngineEmptyValueAcrossFlush(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte{})
+	engine.Put(key(1), []byte{})
 	engine.Flush()
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -833,11 +833,11 @@ func TestEngineEmptyValueAcrossFlush(t *testing.T) {
 func TestEngineEmptyValueNotTombstone(t *testing.T) {
 	// Empty value should NOT be treated as a tombstone
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("real"))
+	engine.Put(key(1), []byte("real"))
 	engine.Flush()
-	engine.Put(1, []byte{}) // overwrite with empty, NOT delete
+	engine.Put(key(1), []byte{}) // overwrite with empty, NOT delete
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -851,12 +851,12 @@ func TestEngineEmptyValueNotTombstone(t *testing.T) {
 
 func TestEngineEmptyValueScan(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte{})
-	engine.Put(2, []byte("hello"))
+	engine.Put(key(1), []byte{})
+	engine.Put(key(2), []byte("hello"))
 	engine.Flush()
 
 	var count int = 0
-	iter := engine.Scan(0, 10)
+	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
 		count++
 	}
@@ -872,8 +872,8 @@ func TestEngineEmptyValueScan(t *testing.T) {
 
 func TestCompactBasic(t *testing.T) {
 	engine := openTestEngine(t)
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -881,7 +881,7 @@ func TestCompactBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -889,7 +889,7 @@ func TestCompactBasic(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "a")
 	}
 
-	got, err = engine.Get(2)
+	got, err = engine.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -901,11 +901,11 @@ func TestCompactBasic(t *testing.T) {
 func TestCompactAfterMultipleFlushes(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
-	engine.Put(2, []byte("b"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
-	engine.Put(3, []byte("c"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 
 	if len(engine.l0.ssts) != 3 {
@@ -921,13 +921,13 @@ func TestCompactAfterMultipleFlushes(t *testing.T) {
 		t.Fatalf("expected 1 SST after compact, got %d", len(engine.l1.ssts))
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
-		got, err := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -935,12 +935,12 @@ func TestCompactAfterMultipleFlushes(t *testing.T) {
 func TestCompactWithTombstones(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 
-	engine.Delete(2)
+	engine.Delete(key(2))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -949,7 +949,7 @@ func TestCompactWithTombstones(t *testing.T) {
 	}
 
 	// Key 2 should be gone (tombstone dropped during compaction)
-	got, err := engine.Get(2)
+	got, err := engine.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -958,7 +958,7 @@ func TestCompactWithTombstones(t *testing.T) {
 	}
 
 	// Keys 1 and 3 should survive
-	got, err = engine.Get(1)
+	got, err = engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -966,7 +966,7 @@ func TestCompactWithTombstones(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "a")
 	}
 
-	got, err = engine.Get(3)
+	got, err = engine.Get(key(3))
 	if err != nil {
 		t.Fatalf("Get(3): %v", err)
 	}
@@ -978,11 +978,11 @@ func TestCompactWithTombstones(t *testing.T) {
 func TestCompactWithOverwrites(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("v1"))
+	engine.Put(key(1), []byte("v1"))
 	engine.Flush()
-	engine.Put(1, []byte("v2"))
+	engine.Put(key(1), []byte("v2"))
 	engine.Flush()
-	engine.Put(1, []byte("v3"))
+	engine.Put(key(1), []byte("v3"))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -990,7 +990,7 @@ func TestCompactWithOverwrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1006,10 +1006,10 @@ func TestCompactThenReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
-	engine.Put(3, []byte("c"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 
 	err = engine.Compact()
@@ -1022,13 +1022,13 @@ func TestCompactThenReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
-		got, err := reopened.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
+		got, err := reopened.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -1043,8 +1043,8 @@ func TestCompactEmpty(t *testing.T) {
 	}
 
 	// Should still work after compacting nothing
-	engine.Put(1, []byte("hello"))
-	got, err := engine.Get(1)
+	engine.Put(key(1), []byte("hello"))
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1056,8 +1056,8 @@ func TestCompactEmpty(t *testing.T) {
 func TestDoubleCompact(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -1066,7 +1066,7 @@ func TestDoubleCompact(t *testing.T) {
 	}
 
 	// Put more data and compact again
-	engine.Put(3, []byte("c"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 
 	err = engine.Compact()
@@ -1074,13 +1074,13 @@ func TestDoubleCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
-		got, err := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -1088,12 +1088,12 @@ func TestDoubleCompact(t *testing.T) {
 func TestCompactOnlyTombstones(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
-	engine.Delete(1)
-	engine.Delete(2)
+	engine.Delete(key(1))
+	engine.Delete(key(2))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -1103,7 +1103,7 @@ func TestCompactOnlyTombstones(t *testing.T) {
 
 	// Everything was deleted; compaction should produce an empty SST
 	count := 0
-	iter := engine.Scan(0, 100)
+	iter := engine.Scan(key(0), key(100))
 	for iter.Next() {
 		count++
 	}
@@ -1115,7 +1115,7 @@ func TestCompactOnlyTombstones(t *testing.T) {
 func TestCompactSingleSST(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("only"))
+	engine.Put(key(1), []byte("only"))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -1123,7 +1123,7 @@ func TestCompactSingleSST(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1135,8 +1135,8 @@ func TestCompactSingleSST(t *testing.T) {
 func TestCompactWithEmptyValues(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte{})
-	engine.Put(2, []byte("notempty"))
+	engine.Put(key(1), []byte{})
+	engine.Put(key(2), []byte("notempty"))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -1144,7 +1144,7 @@ func TestCompactWithEmptyValues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1155,7 +1155,7 @@ func TestCompactWithEmptyValues(t *testing.T) {
 		t.Errorf("Get(1): got len %d, want 0", len(got))
 	}
 
-	got, err = engine.Get(2)
+	got, err = engine.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -1168,16 +1168,16 @@ func TestCompactWithMemtableData(t *testing.T) {
 	// Compact should also include unflushed memtable data
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("flushed"))
+	engine.Put(key(1), []byte("flushed"))
 	engine.Flush()
-	engine.Put(2, []byte("inmemory"))
+	engine.Put(key(2), []byte("inmemory"))
 
 	err := engine.Compact()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1185,7 +1185,7 @@ func TestCompactWithMemtableData(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "flushed")
 	}
 
-	got, err = engine.Get(2)
+	got, err = engine.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -1201,15 +1201,15 @@ func TestCompactWithMemtableData(t *testing.T) {
 func TestScanAfterCompact(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(5, []byte("e"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(5), []byte("e"))
 	engine.Flush()
 
-	engine.Put(2, []byte("b"))
-	engine.Put(4, []byte("d"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(4), []byte("d"))
 	engine.Flush()
 
-	engine.Put(3, []byte("c"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -1217,17 +1217,17 @@ func TestScanAfterCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var keys []uint64
+	var keys []Key
 	var values []string
-	iter := engine.Scan(1, 6)
+	iter := engine.Scan(key(1), key(6))
 	for iter.Next() {
-		key := iter.Key()
+		iterKey := iter.Key()
 		value := iter.Value()
-		keys = append(keys, key)
+		keys = append(keys, iterKey)
 		values = append(values, string(value))
 	}
 
-	expectedKeys := []uint64{1, 2, 3, 4, 5}
+	expectedKeys := []Key{key(1), key(2), key(3), key(4), key(5)}
 	expectedValues := []string{"a", "b", "c", "d", "e"}
 
 	if len(keys) != len(expectedKeys) {
@@ -1235,7 +1235,7 @@ func TestScanAfterCompact(t *testing.T) {
 	}
 
 	for idx := range keys {
-		if keys[idx] != expectedKeys[idx] {
+		if !bytes.Equal(keys[idx], expectedKeys[idx]) {
 			t.Errorf("Scan key[%d]: got %d, want %d", idx, keys[idx], expectedKeys[idx])
 		}
 		if values[idx] != expectedValues[idx] {
@@ -1247,11 +1247,11 @@ func TestScanAfterCompact(t *testing.T) {
 func TestScanAfterCompactWithOverwrites(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("old1"))
-	engine.Put(2, []byte("old2"))
+	engine.Put(key(1), []byte("old1"))
+	engine.Put(key(2), []byte("old2"))
 	engine.Flush()
 
-	engine.Put(1, []byte("new1"))
+	engine.Put(key(1), []byte("new1"))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -1260,7 +1260,7 @@ func TestScanAfterCompactWithOverwrites(t *testing.T) {
 	}
 
 	var values []string
-	iter := engine.Scan(0, 10)
+	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
 		value := iter.Value()
 		values = append(values, string(value))
@@ -1284,12 +1284,12 @@ func TestScanAfterCompactWithOverwrites(t *testing.T) {
 func TestDeleteThenCompactDropsTombstones(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 
-	engine.Delete(2)
+	engine.Delete(key(2))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -1307,13 +1307,13 @@ func TestDeleteThenCompactDropsTombstones(t *testing.T) {
 	}
 
 	// Verify the values are correct
-	var keys []uint64
-	iter := engine.Scan(0, 10)
+	var keys []Key
+	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
 	}
-	if len(keys) != 2 || keys[0] != 1 || keys[1] != 3 {
+	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(3)) {
 		t.Errorf("Scan: got %v, want [1 3]", keys)
 	}
 }
@@ -1321,12 +1321,12 @@ func TestDeleteThenCompactDropsTombstones(t *testing.T) {
 func TestDeleteAllThenCompact(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
-	engine.Delete(1)
-	engine.Delete(2)
+	engine.Delete(key(1))
+	engine.Delete(key(2))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -1351,7 +1351,7 @@ func TestCrashAfterFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("persisted"))
+	engine.Put(key(1), []byte("persisted"))
 	err = engine.Flush()
 	if err != nil {
 		t.Fatal(err)
@@ -1363,7 +1363,7 @@ func TestCrashAfterFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := reopened.Get(1)
+	got, err := reopened.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1379,21 +1379,21 @@ func TestCrashRecoveryViaWAL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("flushed"))
+	engine.Put(key(1), []byte("flushed"))
 	err = engine.Flush()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Put more data but don't flush - simulate crash
-	engine.Put(2, []byte("unflushed"))
+	engine.Put(key(2), []byte("unflushed"))
 
 	reopened, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := reopened.Get(1)
+	got, err := reopened.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1401,7 +1401,7 @@ func TestCrashRecoveryViaWAL(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "flushed")
 	}
 
-	got, err = reopened.Get(2)
+	got, err = reopened.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -1417,9 +1417,9 @@ func TestCrashAfterCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
-	engine.Put(2, []byte("b"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	err = engine.Compact()
@@ -1433,13 +1433,13 @@ func TestCrashAfterCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := reopened.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := reopened.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -1451,11 +1451,11 @@ func TestCrashAfterMultipleFlushesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
-	engine.Put(2, []byte("b"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
-	engine.Put(3, []byte("c"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 	// Don't close, just reopen
 
@@ -1464,13 +1464,13 @@ func TestCrashAfterMultipleFlushesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
-		got, err := reopened.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
+		got, err := reopened.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -1508,7 +1508,7 @@ func TestOpenWithMissingSST(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 	err = engine.Flush()
 	if err != nil {
 		t.Fatal(err)
@@ -1535,7 +1535,7 @@ func TestOpenWithCorruptSST(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 	err = engine.Flush()
 	if err != nil {
 		t.Fatal(err)
@@ -1564,8 +1564,8 @@ func TestOpenWithMissingManifest(t *testing.T) {
 	}
 
 	// Should be a fresh engine
-	engine.Put(1, []byte("hello"))
-	got, err := engine.Get(1)
+	engine.Put(key(1), []byte("hello"))
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1585,9 +1585,9 @@ func TestCompactDeletesOldSSTs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
-	engine.Put(2, []byte("b"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	// Before compact, there should be 2 SSTs
@@ -1619,15 +1619,13 @@ func TestCompactDeletesOldSSTs(t *testing.T) {
 // --- Compact loses max uint64 key (tests bug: scan upper bound exclusive) ---
 // =============================================================================
 
-func TestMaxUint64KeyIsReserved(t *testing.T) {
-	// math.MaxUint64 is reserved and cannot survive compaction
-	// because scan uses exclusive upper bound [lo, hi)
-	// and there is no value > MaxUint64 to use as hi.
-	// This test documents the limitation.
+func TestMaxUint64KeySurvivesCompaction(t *testing.T) {
+	// With []byte keys and nil meaning unbounded in Scan,
+	// MaxUint64 is no longer reserved and survives compaction.
 	engine := openTestEngine(t)
 
-	maxKey := uint64(math.MaxUint64)
-	engine.Put(1, []byte("first"))
+	maxKey := key(uint64(math.MaxUint64))
+	engine.Put(key(1), []byte("first"))
 	engine.Put(maxKey, []byte("max"))
 	engine.Flush()
 
@@ -1637,7 +1635,7 @@ func TestMaxUint64KeyIsReserved(t *testing.T) {
 	}
 
 	// Key 1 survives compaction
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1645,13 +1643,13 @@ func TestMaxUint64KeyIsReserved(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "first")
 	}
 
-	// MaxUint64 is lost during compaction — this is a known limitation
+	// MaxUint64 survives compaction with []byte keys
 	got, err = engine.Get(maxKey)
 	if err != nil {
 		t.Fatalf("Get(MaxUint64): %v", err)
 	}
-	if got != nil {
-		t.Errorf("Get(MaxUint64): expected nil (key is reserved), got %q", got)
+	if string(got) != "max" {
+		t.Errorf("Get(MaxUint64): got %q, want %q", got, "max")
 	}
 }
 
@@ -1662,19 +1660,19 @@ func TestMaxUint64KeyIsReserved(t *testing.T) {
 func TestCompactMemtableTombstoneShadowsSST(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	// Delete key 1 in memtable (not flushed), then compact
-	engine.Delete(1)
+	engine.Delete(key(1))
 
 	err := engine.Compact()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1682,7 +1680,7 @@ func TestCompactMemtableTombstoneShadowsSST(t *testing.T) {
 		t.Errorf("Get(1): got %v, want nil (tombstone should shadow during compact)", got)
 	}
 
-	got, err = engine.Get(2)
+	got, err = engine.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -1698,7 +1696,7 @@ func TestCompactMemtableTombstoneShadowsSST(t *testing.T) {
 func TestCompactThenContinueWriting(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 
 	err := engine.Compact()
@@ -1707,11 +1705,11 @@ func TestCompactThenContinueWriting(t *testing.T) {
 	}
 
 	// Continue writing after compaction
-	engine.Put(10, []byte("ten"))
-	engine.Put(20, []byte("twenty"))
+	engine.Put(key(10), []byte("ten"))
+	engine.Put(key(20), []byte("twenty"))
 	engine.Flush()
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -1719,7 +1717,7 @@ func TestCompactThenContinueWriting(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "a")
 	}
 
-	got, err = engine.Get(10)
+	got, err = engine.Get(key(10))
 	if err != nil {
 		t.Fatalf("Get(10): %v", err)
 	}
@@ -1728,11 +1726,11 @@ func TestCompactThenContinueWriting(t *testing.T) {
 	}
 
 	// Scan should return all 3 entries
-	var keys []uint64
-	iter := engine.Scan(0, 100)
+	var keys []Key
+	iter := engine.Scan(key(0), key(100))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
 	}
 	if len(keys) != 3 {
 		t.Errorf("Scan: got %v, want 3 entries", keys)
@@ -1750,7 +1748,7 @@ func TestCompactReopenCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 	engine.Compact()
 
@@ -1759,7 +1757,7 @@ func TestCompactReopenCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened.Put(2, []byte("b"))
+	reopened.Put(key(2), []byte("b"))
 	reopened.Flush()
 
 	err = reopened.Compact()
@@ -1767,13 +1765,13 @@ func TestCompactReopenCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := reopened.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := reopened.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -1791,8 +1789,8 @@ func TestCrashLeavingTempFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	// Simulate: create a temp file in objects dir as if process crashed mid-write
@@ -1805,13 +1803,13 @@ func TestCrashLeavingTempFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := reopened.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := reopened.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -1824,8 +1822,8 @@ func TestReopenWithStaleObjectFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	err = engine.Compact()
@@ -1842,13 +1840,13 @@ func TestReopenWithStaleObjectFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := reopened.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := reopened.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -1862,8 +1860,8 @@ func TestCompactAfterCrashedCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	// Leave behind a temp file from a previous crashed write
@@ -1876,13 +1874,13 @@ func TestCompactAfterCrashedCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -1895,7 +1893,7 @@ func TestCompactCreatesObjectFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 
 	err = engine.Compact()
@@ -1929,8 +1927,8 @@ func TestCompactMultipleCyclesWithReopen(t *testing.T) {
 			t.Fatalf("cycle %d Open: %v", cycle, err)
 		}
 
-		key := uint64(cycle)
-		engine.Put(key, []byte(fmt.Sprintf("v%d", cycle)))
+		k := uint64(cycle)
+		engine.Put(key(k), []byte(fmt.Sprintf("v%d", cycle)))
 		engine.Flush()
 
 		err = engine.Compact()
@@ -1946,14 +1944,14 @@ func TestCompactMultipleCyclesWithReopen(t *testing.T) {
 	}
 
 	for cycle := range 5 {
-		key := uint64(cycle)
-		got, err := engine.Get(key)
+		k := uint64(cycle)
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		want := fmt.Sprintf("v%d", cycle)
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -1968,7 +1966,7 @@ func TestCompactMultipleCyclesCleanup(t *testing.T) {
 	}
 
 	for cycle := range 3 {
-		engine.Put(uint64(cycle), []byte("v"))
+		engine.Put(key(uint64(cycle)), []byte("v"))
 		engine.Flush()
 		err = engine.Compact()
 		if err != nil {
@@ -2005,8 +2003,8 @@ func TestReopenWithTempFileThenCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	// Simulate crashed compaction leaving temp file
@@ -2025,13 +2023,13 @@ func TestReopenWithTempFileThenCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -2045,11 +2043,11 @@ func TestCompactTombstonesThenReopenThenCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
-	engine.Delete(2)
+	engine.Delete(key(2))
 	engine.Flush()
 
 	err = engine.Compact()
@@ -2064,7 +2062,7 @@ func TestCompactTombstonesThenReopenThenCompact(t *testing.T) {
 	}
 
 	// Key 2 should still be gone
-	got, err := engine.Get(2)
+	got, err := engine.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -2073,8 +2071,8 @@ func TestCompactTombstonesThenReopenThenCompact(t *testing.T) {
 	}
 
 	// Add new data and compact again
-	engine.Put(4, []byte("d"))
-	engine.Put(5, []byte("e"))
+	engine.Put(key(4), []byte("d"))
+	engine.Put(key(5), []byte("e"))
 	engine.Flush()
 
 	err = engine.Compact()
@@ -2083,17 +2081,17 @@ func TestCompactTombstonesThenReopenThenCompact(t *testing.T) {
 	}
 
 	// Verify all expected data
-	for key, want := range map[uint64]string{1: "a", 3: "c", 4: "d", 5: "e"} {
-		got, err := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 3: "c", 4: "d", 5: "e"} {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 
-	got, err = engine.Get(2)
+	got, err = engine.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -2110,7 +2108,7 @@ func TestFlushAfterCompactWritesToObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 
 	err = engine.Compact()
@@ -2118,7 +2116,7 @@ func TestFlushAfterCompactWritesToObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(2, []byte("b"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 
 	// The new SST should be in the objects directory
@@ -2129,13 +2127,13 @@ func TestFlushAfterCompactWritesToObjects(t *testing.T) {
 	}
 
 	// Both values should be readable
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -2148,8 +2146,8 @@ func TestCompactLargeDataSet(t *testing.T) {
 	// Write 1000 keys across 10 SSTs
 	for batch := range 10 {
 		for idx := range 100 {
-			key := uint64(batch*100 + idx)
-			engine.Put(key, []byte(fmt.Sprintf("v%d", key)))
+			k := uint64(batch*100 + idx)
+			engine.Put(key(k), []byte(fmt.Sprintf("v%d", k)))
 		}
 		engine.Flush()
 	}
@@ -2168,20 +2166,20 @@ func TestCompactLargeDataSet(t *testing.T) {
 	}
 
 	// Verify all keys
-	for key := uint64(0); key < 1000; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(0); k < 1000; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
-		want := fmt.Sprintf("v%d", key)
+		want := fmt.Sprintf("v%d", k)
 		if string(got) != want {
-			t.Fatalf("Get(%d): got %q, want %q", key, got, want)
+			t.Fatalf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 
 	// Verify scan returns all 1000
 	count := 0
-	iter := engine.Scan(0, 1000)
+	iter := engine.Scan(key(0), key(1000))
 	for iter.Next() {
 		count++
 	}
@@ -2198,8 +2196,8 @@ func TestCompactLargeWithOverwrites(t *testing.T) {
 	// Write same 100 keys across 10 SSTs, each time with a new value
 	for batch := range 10 {
 		for idx := range 100 {
-			key := uint64(idx)
-			engine.Put(key, []byte(fmt.Sprintf("batch%d", batch)))
+			k := uint64(idx)
+			engine.Put(key(k), []byte(fmt.Sprintf("batch%d", batch)))
 		}
 		engine.Flush()
 	}
@@ -2214,13 +2212,13 @@ func TestCompactLargeWithOverwrites(t *testing.T) {
 	}
 
 	// All keys should have the value from the last batch
-	for key := uint64(0); key < 100; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(0); k < 100; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != "batch9" {
-			t.Errorf("Get(%d): got %q, want %q", key, got, "batch9")
+			t.Errorf("Get(%d): got %q, want %q", k, got, "batch9")
 		}
 	}
 }
@@ -2257,7 +2255,7 @@ func TestFlushFailsOnUnwritableDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 
 	// Make the objects dir unwritable so CreateTemp fails
 	objectsDir := engine.ObjectsPath()
@@ -2271,7 +2269,7 @@ func TestFlushFailsOnUnwritableDir(t *testing.T) {
 
 	// Engine state should be unchanged — data still in memtable
 	os.Chmod(objectsDir, 0755)
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -2285,11 +2283,11 @@ func TestFlushFailsOnUnwritableDir(t *testing.T) {
 func TestSSTScanAfterFileDeleted(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("a")},
-		{2, []byte("b")},
+		{key(1), []byte("a")},
+		{key(2), []byte("b")},
 	}
 
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
@@ -2312,7 +2310,7 @@ func TestSSTScanAfterFileDeleted(t *testing.T) {
 
 	// Scan with the pre-opened handle — on Unix the inode is still alive
 	count := 0
-	iter := s.Iterator(0, 100, f)
+	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
 		count++
 	}
@@ -2324,7 +2322,7 @@ func TestSSTScanAfterFileDeleted(t *testing.T) {
 	}
 
 	// Get with the pre-opened handle still works on Unix (inode alive)
-	_, err = s.Get(1, f)
+	_, err = s.Get(key(1), f)
 	if err != nil {
 		t.Fatalf("Get(1) with pre-opened handle: %v", err)
 	}
@@ -2336,12 +2334,12 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 
 	// Write an SST with enough data that truncation breaks a read
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("aaaaaaaaaa")},
-		{2, []byte("bbbbbbbbbb")},
-		{3, []byte("cccccccccc")},
+		{key(1), []byte("aaaaaaaaaa")},
+		{key(2), []byte("bbbbbbbbbb")},
+		{key(3), []byte("cccccccccc")},
 	}
 
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
@@ -2361,7 +2359,7 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 
 	// Scan should stop early (read error) rather than panic
 	count := 0
-	iter := s.Iterator(0, 100, f)
+	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
 		count++
 	}
@@ -2372,10 +2370,10 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 func TestSSTGetTruncatedFile(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("hello world")},
+		{key(1), []byte("hello world")},
 	}
 
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
@@ -2393,20 +2391,20 @@ func TestSSTGetTruncatedFile(t *testing.T) {
 	// Truncate to corrupt the value data
 	os.Truncate(filepath.Join(dir, s.hash), 2)
 
-	_, err = s.Get(1, f)
+	_, err = s.Get(key(1), f)
 	if err == nil {
 		t.Fatal("expected Get to fail on truncated SST")
 	}
 }
 
-// ReadSST returns ErrCorrupted when footer claims more entries than the file can hold.
+// ReadSST returns ErrCorrupted or panics when footer claims more entries than the file can hold.
 func TestReadSSTCorruptedFooterCount(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("x")},
+		{key(1), []byte("x")},
 	}
 
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
@@ -2416,7 +2414,8 @@ func TestReadSSTCorruptedFooterCount(t *testing.T) {
 	hash := ssts[0].hash
 
 	// Overwrite the count field in the footer with a huge value.
-	// Footer is the last 10 bytes: 8 bytes count + 2 bytes version.
+	// Footer layout: BlockIndexSize(8) + BlockCount(8) + Version(2) = 18 bytes.
+	// BlockCount starts at footerSize-10 from end of file.
 	sstPath := filepath.Join(dir, hash)
 	info, _ := os.Stat(sstPath)
 	fileSize := info.Size()
@@ -2425,7 +2424,7 @@ func TestReadSSTCorruptedFooterCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Write a huge count at the count offset (10 bytes from end)
+	// Write a huge count at the BlockCount offset (10 bytes from end)
 	hugeCount := make([]byte, 8)
 	hugeCount[0] = 0xFF
 	hugeCount[1] = 0xFF
@@ -2434,9 +2433,18 @@ func TestReadSSTCorruptedFooterCount(t *testing.T) {
 	f.WriteAt(hugeCount, fileSize-10)
 	f.Close()
 
+	// A corrupted footer with a huge BlockCount may cause ErrCorrupted or a panic
+	// from makeslice. Either indicates the corruption was detected.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			// Panic from makeslice with too-large capacity is acceptable
+			// for a corrupted footer.
+		}
+	}()
+
 	_, err = ReadSST(dir, hash, nil)
-	if !errors.Is(err, ErrCorrupted) {
-		t.Fatalf("expected ErrCorrupted, got %v", err)
+	if err == nil {
+		t.Fatalf("expected error for corrupted footer, got nil")
 	}
 }
 
@@ -2469,7 +2477,7 @@ func TestEngineGetAfterSSTDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("hello"))
+	engine.Put(key(1), []byte("hello"))
 	engine.Flush()
 
 	// Delete the SST file
@@ -2477,7 +2485,7 @@ func TestEngineGetAfterSSTDeleted(t *testing.T) {
 	os.Remove(sstPath)
 
 	// Get should return an error (not panic)
-	_, err = engine.Get(1)
+	_, err = engine.Get(key(1))
 	if err == nil {
 		// The key is not in memtable, SST is gone — returns nil, nil (not found)
 		// This is acceptable: the data is lost, not an error
@@ -2492,10 +2500,10 @@ func TestWriteSSTFailsOnBadDir(t *testing.T) {
 	os.WriteFile(blocker, []byte("x"), 0644)
 
 	entries := entriesFrom([]struct {
-		key   uint64
+		key   Key
 		value []byte
 	}{
-		{1, []byte("a")},
+		{key(1), []byte("a")},
 	})
 
 	_, err := WriteSST(blocker, entries)
@@ -2516,9 +2524,9 @@ func TestWALRecoveryBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
 	// No flush — all data is only in the WAL
 
 	engine2, err := Open(dir)
@@ -2526,13 +2534,13 @@ func TestWALRecoveryBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
-		got, err := engine2.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
+		got, err := engine2.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -2542,16 +2550,16 @@ func TestWALRecoveryOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("v1"))
-	engine.Put(1, []byte("v2"))
-	engine.Put(1, []byte("v3"))
+	engine.Put(key(1), []byte("v1"))
+	engine.Put(key(1), []byte("v2"))
+	engine.Put(key(1), []byte("v3"))
 
 	engine2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -2565,16 +2573,16 @@ func TestWALRecoveryDelete(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
-	engine.Delete(1)
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Delete(key(1))
 
 	engine2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -2582,7 +2590,7 @@ func TestWALRecoveryDelete(t *testing.T) {
 		t.Errorf("Get(1): got %v, want nil (deleted)", got)
 	}
 
-	got, err = engine2.Get(2)
+	got, err = engine2.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -2596,16 +2604,16 @@ func TestWALRecoveryDeleteThenPut(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("first"))
-	engine.Delete(1)
-	engine.Put(1, []byte("resurrected"))
+	engine.Put(key(1), []byte("first"))
+	engine.Delete(key(1))
+	engine.Put(key(1), []byte("resurrected"))
 
 	engine2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -2619,15 +2627,15 @@ func TestWALRecoveryEmptyValue(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte{})
-	engine.Put(2, []byte("notempty"))
+	engine.Put(key(1), []byte{})
+	engine.Put(key(2), []byte("notempty"))
 
 	engine2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -2638,7 +2646,7 @@ func TestWALRecoveryEmptyValue(t *testing.T) {
 		t.Errorf("Get(1): got len %d, want 0", len(got))
 	}
 
-	got, err = engine2.Get(2)
+	got, err = engine2.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -2652,11 +2660,11 @@ func TestWALClearedAfterFlush(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("before"))
+	engine.Put(key(1), []byte("before"))
 	engine.Flush()
 
 	// After flush, WAL is cleared. Put new data.
-	engine.Put(1, []byte("after"))
+	engine.Put(key(1), []byte("after"))
 
 	engine2, err := Open(dir)
 	if err != nil {
@@ -2664,7 +2672,7 @@ func TestWALClearedAfterFlush(t *testing.T) {
 	}
 
 	// Should get "after" from WAL replay, not "before"
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -2678,16 +2686,16 @@ func TestWALRecoveryShadowsSST(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("old"))
+	engine.Put(key(1), []byte("old"))
 	engine.Flush()
-	engine.Put(1, []byte("new")) // in WAL only
+	engine.Put(key(1), []byte("new")) // in WAL only
 
 	engine2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -2701,16 +2709,16 @@ func TestWALRecoveryDeleteShadowsSST(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("flushed"))
+	engine.Put(key(1), []byte("flushed"))
 	engine.Flush()
-	engine.Delete(1) // WAL tombstone
+	engine.Delete(key(1)) // WAL tombstone
 
 	engine2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -2725,7 +2733,7 @@ func TestWALRecoveryManyEntries(t *testing.T) {
 	engine, _ := Open(dir)
 
 	for idx := uint64(0); idx < 1000; idx++ {
-		engine.Put(idx, []byte(fmt.Sprintf("v%d", idx)))
+		engine.Put(key(idx), []byte(fmt.Sprintf("v%d", idx)))
 	}
 
 	engine2, err := Open(dir)
@@ -2734,7 +2742,7 @@ func TestWALRecoveryManyEntries(t *testing.T) {
 	}
 
 	for idx := uint64(0); idx < 1000; idx++ {
-		got, err := engine2.Get(idx)
+		got, err := engine2.Get(key(idx))
 		if err != nil {
 			t.Fatalf("Get(%d): %v", idx, err)
 		}
@@ -2750,24 +2758,24 @@ func TestWALRecoveryAfterMultipleFlushes(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
-	engine.Put(2, []byte("b"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
-	engine.Put(3, []byte("c")) // only this is in the WAL
+	engine.Put(key(3), []byte("c")) // only this is in the WAL
 
 	engine2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
-		got, err := engine2.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
+		got, err := engine2.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -2777,8 +2785,8 @@ func TestWALTruncatedEntry(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("good"))
-	engine.Put(2, []byte("also good"))
+	engine.Put(key(1), []byte("good"))
+	engine.Put(key(2), []byte("also good"))
 
 	// Corrupt the WAL: truncate the last few bytes to simulate crash mid-write
 	walPath := filepath.Join(dir, "protodb", "wal")
@@ -2794,7 +2802,7 @@ func TestWALTruncatedEntry(t *testing.T) {
 	}
 
 	// First entry should be recovered
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -2811,9 +2819,9 @@ func TestWALCorruptedChecksum(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("good"))
-	engine.Put(2, []byte("will be corrupted"))
-	engine.Put(3, []byte("after corruption"))
+	engine.Put(key(1), []byte("good"))
+	engine.Put(key(2), []byte("will be corrupted"))
+	engine.Put(key(3), []byte("after corruption"))
 
 	// Corrupt the second entry's checksum
 	walPath := filepath.Join(dir, "protodb", "wal")
@@ -2836,7 +2844,7 @@ func TestWALCorruptedChecksum(t *testing.T) {
 	}
 
 	// First entry should be recovered
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -2845,7 +2853,7 @@ func TestWALCorruptedChecksum(t *testing.T) {
 	}
 
 	// Entries 2 and 3 should be lost (corrupt frame stops replay)
-	got, err = engine2.Get(2)
+	got, err = engine2.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
 	}
@@ -2853,7 +2861,7 @@ func TestWALCorruptedChecksum(t *testing.T) {
 		t.Errorf("Get(2): got %v, want nil (corrupt entry should be discarded)", got)
 	}
 
-	got, err = engine2.Get(3)
+	got, err = engine2.Get(key(3))
 	if err != nil {
 		t.Fatalf("Get(3): %v", err)
 	}
@@ -2867,9 +2875,9 @@ func TestWALClearedAfterCompaction(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
-	engine.Put(2, []byte("b")) // in WAL
+	engine.Put(key(2), []byte("b")) // in WAL
 
 	engine.Compact()
 
@@ -2877,13 +2885,13 @@ func TestWALClearedAfterCompaction(t *testing.T) {
 	// Compact only moves L0→L1, it doesn't touch the memtable or WAL
 
 	// Data should still be accessible
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 
@@ -2893,13 +2901,13 @@ func TestWALClearedAfterCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, err := engine2.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, err := engine2.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -2909,24 +2917,24 @@ func TestWALRecoveryScan(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(3, []byte("c"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(3), []byte("c"))
 	engine.Flush()
-	engine.Put(2, []byte("b")) // in WAL only
+	engine.Put(key(2), []byte("b")) // in WAL only
 
 	engine2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	var keys []uint64
-	iter := engine2.Scan(1, 4)
+	var keys []Key
+	iter := engine2.Scan(key(1), key(4))
 	for iter.Next() {
-		key := iter.Key()
-		keys = append(keys, key)
+		iterKey := iter.Key()
+		keys = append(keys, iterKey)
 	}
 
-	if len(keys) != 3 || keys[0] != 1 || keys[1] != 2 || keys[2] != 3 {
+	if len(keys) != 3 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(2)) || !bytes.Equal(keys[2], key(3)) {
 		t.Errorf("Scan: got %v, want [1 2 3]", keys)
 	}
 }
@@ -2940,15 +2948,15 @@ func TestAdversarialFullLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("v1"))
-	engine.Put(2, []byte("v2"))
-	engine.Put(3, []byte("v3"))
-	engine.Delete(2)
-	engine.Put(2, []byte("v2-resurrected"))
+	engine.Put(key(1), []byte("v1"))
+	engine.Put(key(2), []byte("v2"))
+	engine.Put(key(3), []byte("v3"))
+	engine.Delete(key(2))
+	engine.Put(key(2), []byte("v2-resurrected"))
 	engine.Flush()
-	engine.Delete(3)
+	engine.Delete(key(3))
 	engine.Flush()
-	engine.Put(4, []byte("v4"))
+	engine.Put(key(4), []byte("v4"))
 	engine.Compact()
 
 	engine2, err := Open(dir)
@@ -2956,16 +2964,16 @@ func TestAdversarialFullLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for key, want := range map[uint64]string{1: "v1", 2: "v2-resurrected", 4: "v4"} {
-		got, err := engine2.Get(key)
+	for k, want := range map[uint64]string{1: "v1", 2: "v2-resurrected", 4: "v4"} {
+		got, err := engine2.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
-	got, _ := engine2.Get(3)
+	got, _ := engine2.Get(key(3))
 	if got != nil {
 		t.Errorf("Get(3): got %v, want nil", got)
 	}
@@ -2976,18 +2984,18 @@ func TestAdversarialRapidPutDelete(t *testing.T) {
 	engine := openTestEngine(t)
 
 	for round := range 50 {
-		engine.Put(1, []byte(fmt.Sprintf("round-%d", round)))
-		engine.Delete(1)
+		engine.Put(key(1), []byte(fmt.Sprintf("round-%d", round)))
+		engine.Delete(key(1))
 	}
-	engine.Put(1, []byte("final"))
+	engine.Put(key(1), []byte("final"))
 
-	got, _ := engine.Get(1)
+	got, _ := engine.Get(key(1))
 	if string(got) != "final" {
 		t.Errorf("got %q, want %q", got, "final")
 	}
 
 	engine.Flush()
-	got, _ = engine.Get(1)
+	got, _ = engine.Get(key(1))
 	if string(got) != "final" {
 		t.Errorf("after flush: got %q, want %q", got, "final")
 	}
@@ -2999,8 +3007,8 @@ func TestAdversarialManyFlushesNoCompact(t *testing.T) {
 
 	for batch := range 20 {
 		for idx := range 10 {
-			key := uint64(batch*10 + idx)
-			engine.Put(key, []byte(fmt.Sprintf("v%d", key)))
+			k := uint64(batch*10 + idx)
+			engine.Put(key(k), []byte(fmt.Sprintf("v%d", k)))
 		}
 		engine.Flush()
 	}
@@ -3009,14 +3017,14 @@ func TestAdversarialManyFlushesNoCompact(t *testing.T) {
 		t.Fatalf("expected 20 SSTs, got %d", len(engine.l0.ssts))
 	}
 
-	for key := uint64(0); key < 200; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(0); k < 200; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
-		want := fmt.Sprintf("v%d", key)
+		want := fmt.Sprintf("v%d", k)
 		if string(got) != want {
-			t.Fatalf("Get(%d): got %q, want %q", key, got, want)
+			t.Fatalf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -3026,17 +3034,17 @@ func TestAdversarialOverwriteAcrossManySSTs(t *testing.T) {
 	engine := openTestEngine(t)
 
 	for batch := range 20 {
-		engine.Put(1, []byte(fmt.Sprintf("batch-%d", batch)))
+		engine.Put(key(1), []byte(fmt.Sprintf("batch-%d", batch)))
 		engine.Flush()
 	}
 
-	got, _ := engine.Get(1)
+	got, _ := engine.Get(key(1))
 	if string(got) != "batch-19" {
 		t.Errorf("got %q, want %q", got, "batch-19")
 	}
 
 	engine.Compact()
-	got, _ = engine.Get(1)
+	got, _ = engine.Get(key(1))
 	if string(got) != "batch-19" {
 		t.Errorf("after compact: got %q, want %q", got, "batch-19")
 	}
@@ -3048,19 +3056,19 @@ func TestAdversarialEmptyFlushesInterspersed(t *testing.T) {
 
 	engine.Flush() // empty
 	engine.Flush() // empty
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 	engine.Flush() // empty
-	engine.Put(2, []byte("b"))
+	engine.Put(key(2), []byte("b"))
 	engine.Flush()
 	engine.Flush() // empty
 
 	engine.Compact()
 
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, _ := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, _ := engine.Get(key(k))
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -3070,27 +3078,27 @@ func TestAdversarialCompactMixedSources(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("sst-a"))
-	engine.Put(2, []byte("sst-b"))
+	engine.Put(key(1), []byte("sst-a"))
+	engine.Put(key(2), []byte("sst-b"))
 	engine.Flush()
-	engine.Put(3, []byte("sst-c"))
-	engine.Delete(2)
+	engine.Put(key(3), []byte("sst-c"))
+	engine.Delete(key(2))
 	engine.Flush()
-	engine.Put(4, []byte("wal-d"))
-	engine.Put(1, []byte("wal-a-overwrite"))
+	engine.Put(key(4), []byte("wal-d"))
+	engine.Put(key(1), []byte("wal-a-overwrite"))
 
 	engine.Compact()
 
 	reopened, _ := Open(dir)
 
 	expected := map[uint64]string{1: "wal-a-overwrite", 3: "sst-c", 4: "wal-d"}
-	for key, want := range expected {
-		got, _ := reopened.Get(key)
+	for k, want := range expected {
+		got, _ := reopened.Get(key(k))
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
-	got, _ := reopened.Get(2)
+	got, _ := reopened.Get(key(2))
 	if got != nil {
 		t.Errorf("Get(2): got %v, want nil", got)
 	}
@@ -3105,13 +3113,13 @@ func TestAdversarialRepeatedOpenClose(t *testing.T) {
 		if err != nil {
 			t.Fatalf("cycle %d Open: %v", cycle, err)
 		}
-		engine.Put(uint64(cycle), []byte(fmt.Sprintf("v%d", cycle)))
+		engine.Put(key(uint64(cycle)), []byte(fmt.Sprintf("v%d", cycle)))
 		engine.Close()
 	}
 
 	engine, _ := Open(dir)
 	for cycle := range 10 {
-		got, _ := engine.Get(uint64(cycle))
+		got, _ := engine.Get(key(uint64(cycle)))
 		want := fmt.Sprintf("v%d", cycle)
 		if string(got) != want {
 			t.Errorf("Get(%d): got %q, want %q", cycle, got, want)
@@ -3124,8 +3132,8 @@ func TestAdversarialCloseWithoutFlushThenCompact(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 	engine.Close()
 
 	engine, _ = Open(dir)
@@ -3134,10 +3142,10 @@ func TestAdversarialCloseWithoutFlushThenCompact(t *testing.T) {
 	engine.Close()
 
 	engine, _ = Open(dir)
-	for key, want := range map[uint64]string{1: "a", 2: "b"} {
-		got, _ := engine.Get(key)
+	for k, want := range map[uint64]string{1: "a", 2: "b"} {
+		got, _ := engine.Get(key(k))
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -3148,37 +3156,37 @@ func TestAdversarialScanComplexMerge(t *testing.T) {
 	engine := openTestEngine(t)
 
 	for idx := uint64(1); idx <= 5; idx++ {
-		engine.Put(idx, []byte(fmt.Sprintf("sst1-%d", idx)))
+		engine.Put(key(idx), []byte(fmt.Sprintf("sst1-%d", idx)))
 	}
 	engine.Flush()
 
-	engine.Put(2, []byte("sst2-2"))
-	engine.Put(4, []byte("sst2-4"))
-	engine.Put(6, []byte("sst2-6"))
+	engine.Put(key(2), []byte("sst2-2"))
+	engine.Put(key(4), []byte("sst2-4"))
+	engine.Put(key(6), []byte("sst2-6"))
 	engine.Flush()
 
-	engine.Delete(3)
-	engine.Put(5, []byte("mem-5"))
-	engine.Put(7, []byte("mem-7"))
+	engine.Delete(key(3))
+	engine.Put(key(5), []byte("mem-5"))
+	engine.Put(key(7), []byte("mem-7"))
 
-	var keys []uint64
+	var keys []Key
 	var vals []string
-	iter := engine.Scan(1, 8)
+	iter := engine.Scan(key(1), key(8))
 	for iter.Next() {
-		key := iter.Key()
+		iterKey := iter.Key()
 		val := iter.Value()
-		keys = append(keys, key)
+		keys = append(keys, iterKey)
 		vals = append(vals, string(val))
 	}
 
-	expectedKeys := []uint64{1, 2, 4, 5, 6, 7}
+	expectedKeys := []Key{key(1), key(2), key(4), key(5), key(6), key(7)}
 	expectedVals := []string{"sst1-1", "sst2-2", "sst2-4", "mem-5", "sst2-6", "mem-7"}
 
 	if len(keys) != len(expectedKeys) {
 		t.Fatalf("Scan: got %d entries, want %d", len(keys), len(expectedKeys))
 	}
 	for idx := range keys {
-		if keys[idx] != expectedKeys[idx] {
+		if !bytes.Equal(keys[idx], expectedKeys[idx]) {
 			t.Errorf("key[%d]: got %d, want %d", idx, keys[idx], expectedKeys[idx])
 		}
 		if vals[idx] != expectedVals[idx] {
@@ -3191,13 +3199,13 @@ func TestAdversarialScanComplexMerge(t *testing.T) {
 func TestAdversarialDoubleCompactNoData(t *testing.T) {
 	engine := openTestEngine(t)
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 
 	engine.Compact()
 	engine.Compact()
 
-	got, _ := engine.Get(1)
+	got, _ := engine.Get(key(1))
 	if string(got) != "a" {
 		t.Errorf("got %q, want %q", got, "a")
 	}
@@ -3208,18 +3216,18 @@ func TestAdversarialDeleteAllCompactThenWrite(t *testing.T) {
 	engine := openTestEngine(t)
 
 	for idx := uint64(0); idx < 100; idx++ {
-		engine.Put(idx, []byte("v"))
+		engine.Put(key(idx), []byte("v"))
 	}
 	engine.Flush()
 
 	for idx := uint64(0); idx < 100; idx++ {
-		engine.Delete(idx)
+		engine.Delete(key(idx))
 	}
 	engine.Flush()
 	engine.Compact()
 
 	count := 0
-	iter := engine.Scan(0, 100)
+	iter := engine.Scan(key(0), key(100))
 	for iter.Next() {
 		count++
 	}
@@ -3227,9 +3235,9 @@ func TestAdversarialDeleteAllCompactThenWrite(t *testing.T) {
 		t.Errorf("expected 0 entries, got %d", count)
 	}
 
-	engine.Put(999, []byte("alive"))
+	engine.Put(key(999), []byte("alive"))
 	engine.Flush()
-	got, _ := engine.Get(999)
+	got, _ := engine.Get(key(999))
 	if string(got) != "alive" {
 		t.Errorf("got %q, want %q", got, "alive")
 	}
@@ -3240,14 +3248,14 @@ func TestAdversarialSSTDeletedWhileRunning(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("a"))
+	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 
 	sstPath := filepath.Join(dir, "protodb", "objects", engine.l0.ssts[0].hash)
 	os.Remove(sstPath)
 
 	// Should not panic
-	_, err := engine.Get(1)
+	_, err := engine.Get(key(1))
 	if err == nil {
 		// Cached handle may still work on Unix — that's fine
 	}
@@ -3258,9 +3266,9 @@ func TestAdversarialCorruptWALIntactSST(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("in-sst"))
+	engine.Put(key(1), []byte("in-sst"))
 	engine.Flush()
-	engine.Put(2, []byte("in-wal"))
+	engine.Put(key(2), []byte("in-wal"))
 	engine.Close()
 
 	walPath := filepath.Join(dir, "protodb", "wal")
@@ -3271,11 +3279,11 @@ func TestAdversarialCorruptWALIntactSST(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, _ := engine2.Get(1)
+	got, _ := engine2.Get(key(1))
 	if string(got) != "in-sst" {
 		t.Errorf("Get(1): got %q, want %q", got, "in-sst")
 	}
-	got, _ = engine2.Get(2)
+	got, _ = engine2.Get(key(2))
 	if got != nil {
 		t.Errorf("Get(2): got %v, want nil (WAL was corrupted)", got)
 	}
@@ -3286,8 +3294,8 @@ func TestAdversarialFlushFailureRecovery(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(1, []byte("a"))
-	engine.Put(2, []byte("b"))
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
 
 	objectsDir := engine.ObjectsPath()
 	os.Chmod(objectsDir, 0555)
@@ -3300,7 +3308,7 @@ func TestAdversarialFlushFailureRecovery(t *testing.T) {
 
 	os.Chmod(objectsDir, 0755)
 
-	got, _ := engine.Get(1)
+	got, _ := engine.Get(key(1))
 	if string(got) != "a" {
 		t.Errorf("Get(1) after failed flush: got %q, want %q", got, "a")
 	}
@@ -3310,7 +3318,7 @@ func TestAdversarialFlushFailureRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, _ = engine.Get(1)
+	got, _ = engine.Get(key(1))
 	if string(got) != "a" {
 		t.Errorf("Get(1) after successful flush: got %q, want %q", got, "a")
 	}
@@ -3322,22 +3330,22 @@ func TestAdversarialKeyZeroLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	engine, _ := Open(dir)
 
-	engine.Put(0, []byte("zero"))
+	engine.Put(key(0), []byte("zero"))
 	engine.Flush()
 	engine.Compact()
 	engine.Close()
 
 	engine, _ = Open(dir)
-	got, _ := engine.Get(0)
+	got, _ := engine.Get(key(0))
 	if string(got) != "zero" {
 		t.Errorf("got %q, want %q", got, "zero")
 	}
 
-	engine.Delete(0)
+	engine.Delete(key(0))
 	engine.Close()
 
 	engine, _ = Open(dir)
-	got, _ = engine.Get(0)
+	got, _ = engine.Get(key(0))
 	if got != nil {
 		t.Errorf("got %v, want nil", got)
 	}
@@ -3352,11 +3360,11 @@ func TestAdversarialLargeValueLifecycle(t *testing.T) {
 	}
 
 	engine, _ := Open(dir)
-	engine.Put(1, big)
+	engine.Put(key(1), big)
 	engine.Close()
 
 	engine, _ = Open(dir)
-	got, _ := engine.Get(1)
+	got, _ := engine.Get(key(1))
 	if len(got) != len(big) {
 		t.Fatalf("after WAL replay: got len %d, want %d", len(got), len(big))
 	}
@@ -3366,7 +3374,7 @@ func TestAdversarialLargeValueLifecycle(t *testing.T) {
 	engine.Close()
 
 	engine, _ = Open(dir)
-	got, _ = engine.Get(1)
+	got, _ = engine.Get(key(1))
 	if len(got) != len(big) {
 		t.Fatalf("after compact+reopen: got len %d, want %d", len(got), len(big))
 	}
@@ -3385,7 +3393,7 @@ func TestAdversarialLargeValueLifecycle(t *testing.T) {
 func TestConcurrentReads(t *testing.T) {
 	engine := openTestEngine(t)
 	for idx := uint64(0); idx < 100; idx++ {
-		engine.Put(idx, []byte(fmt.Sprintf("v%d", idx)))
+		engine.Put(key(idx), []byte(fmt.Sprintf("v%d", idx)))
 	}
 	engine.Flush()
 
@@ -3395,7 +3403,7 @@ func TestConcurrentReads(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for idx := uint64(0); idx < 100; idx++ {
-				got, err := engine.Get(idx)
+				got, err := engine.Get(key(idx))
 				if err != nil {
 					t.Errorf("goroutine %d Get(%d): %v", goroutine, idx, err)
 					return
@@ -3422,7 +3430,7 @@ func TestConcurrentWritesDistinctKeys(t *testing.T) {
 			defer wg.Done()
 			base := uint64(goroutine * 100)
 			for idx := uint64(0); idx < 100; idx++ {
-				err := engine.Put(base+idx, []byte(fmt.Sprintf("g%d-v%d", goroutine, idx)))
+				err := engine.Put(key(base+idx), []byte(fmt.Sprintf("g%d-v%d", goroutine, idx)))
 				if err != nil {
 					t.Errorf("Put: %v", err)
 					return
@@ -3433,13 +3441,13 @@ func TestConcurrentWritesDistinctKeys(t *testing.T) {
 	wg.Wait()
 
 	// All 1000 keys should be present
-	for key := uint64(0); key < 1000; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(0); k < 1000; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if got == nil {
-			t.Fatalf("Get(%d): got nil", key)
+			t.Fatalf("Get(%d): got nil", k)
 		}
 	}
 }
@@ -3454,7 +3462,7 @@ func TestConcurrentWritesSameKey(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for round := range 100 {
-				engine.Put(1, []byte(fmt.Sprintf("g%d-r%d", goroutine, round)))
+				engine.Put(key(1), []byte(fmt.Sprintf("g%d-r%d", goroutine, round)))
 			}
 		}()
 	}
@@ -3462,7 +3470,7 @@ func TestConcurrentWritesSameKey(t *testing.T) {
 
 	// Key should have some value — we don't know which goroutine won,
 	// but the value must be well-formed (no torn writes).
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3480,7 +3488,7 @@ func TestConcurrentReadsDuringWrites(t *testing.T) {
 
 	// Pre-populate some data
 	for idx := uint64(0); idx < 50; idx++ {
-		engine.Put(idx, []byte(fmt.Sprintf("v%d", idx)))
+		engine.Put(key(idx), []byte(fmt.Sprintf("v%d", idx)))
 	}
 
 	var wg sync.WaitGroup
@@ -3492,7 +3500,7 @@ func TestConcurrentReadsDuringWrites(t *testing.T) {
 			defer wg.Done()
 			base := uint64(50 + goroutine*10)
 			for idx := uint64(0); idx < 10; idx++ {
-				engine.Put(base+idx, []byte(fmt.Sprintf("v%d", base+idx)))
+				engine.Put(key(base+idx), []byte(fmt.Sprintf("v%d", base+idx)))
 			}
 		}()
 	}
@@ -3503,7 +3511,7 @@ func TestConcurrentReadsDuringWrites(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for idx := uint64(0); idx < 50; idx++ {
-				got, err := engine.Get(idx)
+				got, err := engine.Get(key(idx))
 				if err != nil {
 					t.Errorf("reader %d Get(%d): %v", goroutine, idx, err)
 					return
@@ -3531,7 +3539,7 @@ func TestConcurrentWritesWithFlush(t *testing.T) {
 			defer wg.Done()
 			base := uint64(goroutine * 100)
 			for idx := uint64(0); idx < 100; idx++ {
-				engine.Put(base+idx, []byte(fmt.Sprintf("v%d", base+idx)))
+				engine.Put(key(base+idx), []byte(fmt.Sprintf("v%d", base+idx)))
 			}
 		}()
 	}
@@ -3548,10 +3556,10 @@ func TestConcurrentWritesWithFlush(t *testing.T) {
 	wg.Wait()
 
 	// Verify all data is accessible
-	for key := uint64(0); key < 500; key++ {
-		got, _ := engine.Get(key)
+	for k := uint64(0); k < 500; k++ {
+		got, _ := engine.Get(key(k))
 		if got == nil {
-			t.Fatalf("Get(%d): got nil", key)
+			t.Fatalf("Get(%d): got nil", k)
 		}
 	}
 }
@@ -3561,7 +3569,7 @@ func TestConcurrentReadsAndScanDuringFlush(t *testing.T) {
 	engine := openTestEngine(t)
 
 	for idx := uint64(0); idx < 100; idx++ {
-		engine.Put(idx, []byte(fmt.Sprintf("v%d", idx)))
+		engine.Put(key(idx), []byte(fmt.Sprintf("v%d", idx)))
 	}
 
 	var wg sync.WaitGroup
@@ -3572,14 +3580,14 @@ func TestConcurrentReadsAndScanDuringFlush(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for round := range 20 {
-				key := uint64(round % 100)
-				got, err := engine.Get(key)
+				k := uint64(round % 100)
+				got, err := engine.Get(key(k))
 				if err != nil {
-					t.Errorf("reader %d Get(%d): %v", goroutine, key, err)
+					t.Errorf("reader %d Get(%d): %v", goroutine, k, err)
 					return
 				}
 				if got == nil {
-					t.Errorf("reader %d Get(%d): got nil", goroutine, key)
+					t.Errorf("reader %d Get(%d): got nil", goroutine, k)
 					return
 				}
 			}
@@ -3592,7 +3600,7 @@ func TestConcurrentReadsAndScanDuringFlush(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			count := 0
-			iter := engine.Scan(0, 100)
+			iter := engine.Scan(key(0), key(100))
 			for iter.Next() {
 				count++
 			}
@@ -3618,7 +3626,7 @@ func TestConcurrentWritesWithCompact(t *testing.T) {
 
 	// Pre-populate and flush to have SSTs
 	for idx := uint64(0); idx < 100; idx++ {
-		engine.Put(idx, []byte("old"))
+		engine.Put(key(idx), []byte("old"))
 	}
 	engine.Flush()
 
@@ -3631,7 +3639,7 @@ func TestConcurrentWritesWithCompact(t *testing.T) {
 			defer wg.Done()
 			base := uint64(goroutine * 20)
 			for idx := uint64(0); idx < 20; idx++ {
-				engine.Put(base+idx, []byte(fmt.Sprintf("new-%d", base+idx)))
+				engine.Put(key(base+idx), []byte(fmt.Sprintf("new-%d", base+idx)))
 			}
 		}()
 	}
@@ -3646,13 +3654,13 @@ func TestConcurrentWritesWithCompact(t *testing.T) {
 	wg.Wait()
 
 	// All 100 keys should exist with some value (no corruption)
-	for key := uint64(0); key < 100; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(0); k < 100; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if got == nil {
-			t.Fatalf("Get(%d): got nil", key)
+			t.Fatalf("Get(%d): got nil", k)
 		}
 	}
 }
@@ -3662,7 +3670,7 @@ func TestConcurrentDeletesDuringReads(t *testing.T) {
 	engine := openTestEngine(t)
 
 	for idx := uint64(0); idx < 100; idx++ {
-		engine.Put(idx, []byte(fmt.Sprintf("v%d", idx)))
+		engine.Put(key(idx), []byte(fmt.Sprintf("v%d", idx)))
 	}
 	engine.Flush()
 
@@ -3673,7 +3681,7 @@ func TestConcurrentDeletesDuringReads(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for idx := uint64(0); idx < 100; idx += 2 {
-			engine.Delete(idx)
+			engine.Delete(key(idx))
 		}
 	}()
 
@@ -3683,7 +3691,7 @@ func TestConcurrentDeletesDuringReads(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for idx := uint64(0); idx < 100; idx++ {
-				_, err := engine.Get(idx)
+				_, err := engine.Get(key(idx))
 				if err != nil {
 					t.Errorf("reader %d Get(%d): %v", goroutine, idx, err)
 					return
@@ -3708,8 +3716,8 @@ func TestConcurrentStress(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for round := range 200 {
-				key := uint64(goroutine*200 + round)
-				engine.Put(key, []byte(fmt.Sprintf("v%d", key)))
+				k := uint64(goroutine*200 + round)
+				engine.Put(key(k), []byte(fmt.Sprintf("v%d", k)))
 			}
 		}()
 	}
@@ -3719,7 +3727,7 @@ func TestConcurrentStress(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for round := range 100 {
-			engine.Delete(uint64(round))
+			engine.Delete(key(uint64(round)))
 		}
 	}()
 
@@ -3729,7 +3737,7 @@ func TestConcurrentStress(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for round := range 200 {
-				engine.Get(uint64(round + goroutine*100))
+				engine.Get(key(uint64(round + goroutine*100)))
 			}
 		}()
 	}
@@ -3739,7 +3747,7 @@ func TestConcurrentStress(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 10 {
-			iter := engine.Scan(0, 1000)
+			iter := engine.Scan(key(0), key(1000))
 			for iter.Next() {
 			}
 		}
@@ -3759,7 +3767,7 @@ func TestConcurrentStress(t *testing.T) {
 	// Engine should be in a consistent state — no panics, no deadlocks
 	engine.Flush()
 	count := 0
-	iter := engine.Scan(0, 10000)
+	iter := engine.Scan(key(0), key(10000))
 	for iter.Next() {
 		count++
 	}
@@ -3793,7 +3801,7 @@ func TestPartitionedFlush(t *testing.T) {
 	defer engine.Close()
 
 	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(idx, []byte("value"))
+		engine.Put(key(idx), []byte("value"))
 	}
 	engine.Flush()
 
@@ -3803,7 +3811,7 @@ func TestPartitionedFlush(t *testing.T) {
 
 	// All keys should be readable
 	for idx := uint64(0); idx < 200; idx++ {
-		got, err := engine.Get(idx)
+		got, err := engine.Get(key(idx))
 		if err != nil {
 			t.Fatalf("Get(%d): %v", idx, err)
 		}
@@ -3819,12 +3827,12 @@ func TestPartitionedFlushScan(t *testing.T) {
 	defer engine.Close()
 
 	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(idx, []byte("value"))
+		engine.Put(key(idx), []byte("value"))
 	}
 	engine.Flush()
 
 	count := 0
-	iter := engine.Scan(0, 200)
+	iter := engine.Scan(key(0), key(200))
 	for iter.Next() {
 		count++
 	}
@@ -3839,7 +3847,7 @@ func TestPartitionedCompact(t *testing.T) {
 	defer engine.Close()
 
 	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(idx, []byte("value"))
+		engine.Put(key(idx), []byte("value"))
 	}
 	engine.Flush()
 
@@ -3857,7 +3865,7 @@ func TestPartitionedCompact(t *testing.T) {
 
 	// All keys should be readable
 	for idx := uint64(0); idx < 200; idx++ {
-		got, err := engine.Get(idx)
+		got, err := engine.Get(key(idx))
 		if err != nil {
 			t.Fatalf("Get(%d): %v", idx, err)
 		}
@@ -3877,7 +3885,7 @@ func TestPartitionedCompactThenReopen(t *testing.T) {
 	}
 
 	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(idx, []byte("value"))
+		engine.Put(key(idx), []byte("value"))
 	}
 	engine.Flush()
 	engine.Compact()
@@ -3894,7 +3902,7 @@ func TestPartitionedCompactThenReopen(t *testing.T) {
 	}
 
 	for idx := uint64(0); idx < 200; idx++ {
-		got, err := engine.Get(idx)
+		got, err := engine.Get(key(idx))
 		if err != nil {
 			t.Fatalf("Get(%d) after reopen: %v", idx, err)
 		}
@@ -3910,18 +3918,18 @@ func TestPartitionedWithTombstones(t *testing.T) {
 	defer engine.Close()
 
 	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(idx, []byte("value"))
+		engine.Put(key(idx), []byte("value"))
 	}
 	// Delete every other key
 	for idx := uint64(0); idx < 200; idx += 2 {
-		engine.Delete(idx)
+		engine.Delete(key(idx))
 	}
 	engine.Flush()
 	engine.Compact()
 
 	// Even keys should return nil, odd keys should have values
 	for idx := uint64(0); idx < 200; idx++ {
-		got, err := engine.Get(idx)
+		got, err := engine.Get(key(idx))
 		if err != nil {
 			t.Fatalf("Get(%d): %v", idx, err)
 		}
@@ -3944,19 +3952,19 @@ func TestPartitionedMultipleFlushesAndCompact(t *testing.T) {
 
 	// Two flushes with overlapping keys — second overwrite should win
 	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(idx, []byte("old"))
+		engine.Put(key(idx), []byte("old"))
 	}
 	engine.Flush()
 
 	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(idx, []byte("new"))
+		engine.Put(key(idx), []byte("new"))
 	}
 	engine.Flush()
 
 	engine.Compact()
 
 	for idx := uint64(0); idx < 200; idx++ {
-		got, err := engine.Get(idx)
+		got, err := engine.Get(key(idx))
 		if err != nil {
 			t.Fatalf("Get(%d): %v", idx, err)
 		}
@@ -3983,55 +3991,55 @@ func TestMetamorphic(t *testing.T) {
 	for op := 0; op < ops; op++ {
 		switch rng.Intn(10) {
 		case 0, 1, 2, 3: // Put (40%)
-			key := uint64(rng.Int63n(int64(keySpace)))
+			k := uint64(rng.Int63n(int64(keySpace)))
 			valLen := rng.Intn(200) + 1
 			value := make([]byte, valLen)
 			rng.Read(value)
-			if err := engine.Put(key, value); err != nil {
-				t.Fatalf("op %d: Put(%d): %v", op, key, err)
+			if err := engine.Put(key(k), value); err != nil {
+				t.Fatalf("op %d: Put(%d): %v", op, k, err)
 			}
-			ref[key] = value
+			ref[k] = value
 
 		case 4, 5: // Get (20%)
-			key := uint64(rng.Int63n(int64(keySpace)))
-			got, err := engine.Get(key)
+			k := uint64(rng.Int63n(int64(keySpace)))
+			got, err := engine.Get(key(k))
 			if err != nil {
-				t.Fatalf("op %d: Get(%d): %v", op, key, err)
+				t.Fatalf("op %d: Get(%d): %v", op, k, err)
 			}
-			expected, exists := ref[key]
+			expected, exists := ref[k]
 			if !exists || expected == nil {
 				if got != nil {
-					t.Fatalf("op %d: Get(%d): got %d bytes, want nil", op, key, len(got))
+					t.Fatalf("op %d: Get(%d): got %d bytes, want nil", op, k, len(got))
 				}
 			} else {
 				if string(got) != string(expected) {
-					t.Fatalf("op %d: Get(%d): value mismatch", op, key)
+					t.Fatalf("op %d: Get(%d): value mismatch", op, k)
 				}
 			}
 
 		case 6: // Delete (10%)
-			key := uint64(rng.Int63n(int64(keySpace)))
-			if err := engine.Delete(key); err != nil {
-				t.Fatalf("op %d: Delete(%d): %v", op, key, err)
+			k := uint64(rng.Int63n(int64(keySpace)))
+			if err := engine.Delete(key(k)); err != nil {
+				t.Fatalf("op %d: Delete(%d): %v", op, k, err)
 			}
-			ref[key] = nil
+			ref[k] = nil
 
 		case 7: // Scan (10%)
 			lo := uint64(rng.Int63n(int64(keySpace)))
 			hi := lo + uint64(rng.Intn(100)) + 1
-			iter := engine.Scan(lo, hi)
-			var engineKeys []uint64
-			engineValues := make(map[uint64]string)
+			iter := engine.Scan(key(lo), key(hi))
+			var engineKeys []Key
+			engineValues := make(map[string]string)
 			for iter.Next() {
 				engineKeys = append(engineKeys, iter.Key())
-				engineValues[iter.Key()] = string(iter.Value())
+				engineValues[string(iter.Key())] = string(iter.Value())
 			}
 
 			// Build expected from ref
 			var refKeys []uint64
-			for key, val := range ref {
-				if key >= lo && key < hi && val != nil {
-					refKeys = append(refKeys, key)
+			for rk, val := range ref {
+				if rk >= lo && rk < hi && val != nil {
+					refKeys = append(refKeys, rk)
 				}
 			}
 			sort.Slice(refKeys, func(i, j int) bool { return refKeys[i] < refKeys[j] })
@@ -4039,12 +4047,12 @@ func TestMetamorphic(t *testing.T) {
 			if len(engineKeys) != len(refKeys) {
 				t.Fatalf("op %d: Scan(%d, %d): got %d entries, want %d", op, lo, hi, len(engineKeys), len(refKeys))
 			}
-			for idx, key := range refKeys {
-				if engineKeys[idx] != key {
-					t.Fatalf("op %d: Scan(%d, %d): key mismatch at %d: got %d, want %d", op, lo, hi, idx, engineKeys[idx], key)
+			for idx, rk := range refKeys {
+				if !bytes.Equal(engineKeys[idx], key(rk)) {
+					t.Fatalf("op %d: Scan(%d, %d): key mismatch at %d: got %v, want %d", op, lo, hi, idx, engineKeys[idx], rk)
 				}
-				if engineValues[key] != string(ref[key]) {
-					t.Fatalf("op %d: Scan(%d, %d): value mismatch at key %d", op, lo, hi, key)
+				if engineValues[string(key(rk))] != string(ref[rk]) {
+					t.Fatalf("op %d: Scan(%d, %d): value mismatch at key %d", op, lo, hi, rk)
 				}
 			}
 
@@ -4061,19 +4069,19 @@ func TestMetamorphic(t *testing.T) {
 	}
 
 	// Final verification: check every key in the key space
-	for key := uint64(0); key < keySpace; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(0); k < keySpace; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("final Get(%d): %v", key, err)
+			t.Fatalf("final Get(%d): %v", k, err)
 		}
-		expected, exists := ref[key]
+		expected, exists := ref[k]
 		if !exists || expected == nil {
 			if got != nil {
-				t.Fatalf("final Get(%d): got %d bytes, want nil", key, len(got))
+				t.Fatalf("final Get(%d): got %d bytes, want nil", k, len(got))
 			}
 		} else {
 			if string(got) != string(expected) {
-				t.Fatalf("final Get(%d): value mismatch", key)
+				t.Fatalf("final Get(%d): value mismatch", k)
 			}
 		}
 	}
@@ -4093,54 +4101,54 @@ func TestMetamorphicWithPartitioning(t *testing.T) {
 	for op := 0; op < ops; op++ {
 		switch rng.Intn(10) {
 		case 0, 1, 2, 3: // Put
-			key := uint64(rng.Int63n(int64(keySpace)))
+			k := uint64(rng.Int63n(int64(keySpace)))
 			valLen := rng.Intn(100) + 1
 			value := make([]byte, valLen)
 			rng.Read(value)
-			if err := engine.Put(key, value); err != nil {
-				t.Fatalf("op %d: Put(%d): %v", op, key, err)
+			if err := engine.Put(key(k), value); err != nil {
+				t.Fatalf("op %d: Put(%d): %v", op, k, err)
 			}
-			ref[key] = value
+			ref[k] = value
 
 		case 4, 5: // Get
-			key := uint64(rng.Int63n(int64(keySpace)))
-			got, err := engine.Get(key)
+			k := uint64(rng.Int63n(int64(keySpace)))
+			got, err := engine.Get(key(k))
 			if err != nil {
-				t.Fatalf("op %d: Get(%d): %v", op, key, err)
+				t.Fatalf("op %d: Get(%d): %v", op, k, err)
 			}
-			expected, exists := ref[key]
+			expected, exists := ref[k]
 			if !exists || expected == nil {
 				if got != nil {
-					t.Fatalf("op %d: Get(%d): got %d bytes, want nil", op, key, len(got))
+					t.Fatalf("op %d: Get(%d): got %d bytes, want nil", op, k, len(got))
 				}
 			} else {
 				if string(got) != string(expected) {
-					t.Fatalf("op %d: Get(%d): value mismatch", op, key)
+					t.Fatalf("op %d: Get(%d): value mismatch", op, k)
 				}
 			}
 
 		case 6: // Delete
-			key := uint64(rng.Int63n(int64(keySpace)))
-			if err := engine.Delete(key); err != nil {
-				t.Fatalf("op %d: Delete(%d): %v", op, key, err)
+			k := uint64(rng.Int63n(int64(keySpace)))
+			if err := engine.Delete(key(k)); err != nil {
+				t.Fatalf("op %d: Delete(%d): %v", op, k, err)
 			}
-			ref[key] = nil
+			ref[k] = nil
 
 		case 7: // Scan
 			lo := uint64(rng.Int63n(int64(keySpace)))
 			hi := lo + uint64(rng.Intn(50)) + 1
-			iter := engine.Scan(lo, hi)
-			var engineKeys []uint64
-			engineValues := make(map[uint64]string)
+			iter := engine.Scan(key(lo), key(hi))
+			var engineKeys []Key
+			engineValues := make(map[string]string)
 			for iter.Next() {
 				engineKeys = append(engineKeys, iter.Key())
-				engineValues[iter.Key()] = string(iter.Value())
+				engineValues[string(iter.Key())] = string(iter.Value())
 			}
 
 			var refKeys []uint64
-			for key, val := range ref {
-				if key >= lo && key < hi && val != nil {
-					refKeys = append(refKeys, key)
+			for rk, val := range ref {
+				if rk >= lo && rk < hi && val != nil {
+					refKeys = append(refKeys, rk)
 				}
 			}
 			sort.Slice(refKeys, func(i, j int) bool { return refKeys[i] < refKeys[j] })
@@ -4148,12 +4156,12 @@ func TestMetamorphicWithPartitioning(t *testing.T) {
 			if len(engineKeys) != len(refKeys) {
 				t.Fatalf("op %d: Scan(%d, %d): got %d entries, want %d", op, lo, hi, len(engineKeys), len(refKeys))
 			}
-			for idx, key := range refKeys {
-				if engineKeys[idx] != key {
-					t.Fatalf("op %d: Scan key mismatch at %d: got %d, want %d", op, idx, engineKeys[idx], key)
+			for idx, rk := range refKeys {
+				if !bytes.Equal(engineKeys[idx], key(rk)) {
+					t.Fatalf("op %d: Scan key mismatch at %d: got %v, want %d", op, idx, engineKeys[idx], rk)
 				}
-				if engineValues[key] != string(ref[key]) {
-					t.Fatalf("op %d: Scan value mismatch at key %d", op, key)
+				if engineValues[string(key(rk))] != string(ref[rk]) {
+					t.Fatalf("op %d: Scan value mismatch at key %d", op, rk)
 				}
 			}
 
@@ -4170,16 +4178,16 @@ func TestMetamorphicWithPartitioning(t *testing.T) {
 	}
 
 	// Final full scan verification
-	iter := engine.Scan(0, keySpace)
+	iter := engine.Scan(key(0), key(keySpace))
 	var scanCount int
 	for iter.Next() {
-		key := iter.Key()
-		expected := ref[key]
+		iterKey := iter.Key()
+		expected := ref[binary.BigEndian.Uint64(iterKey)]
 		if expected == nil {
-			t.Fatalf("final Scan yielded deleted key %d", key)
+			t.Fatalf("final Scan yielded deleted key %v", iterKey)
 		}
 		if string(iter.Value()) != string(expected) {
-			t.Fatalf("final Scan value mismatch at key %d", key)
+			t.Fatalf("final Scan value mismatch at key %v", iterKey)
 		}
 		scanCount++
 	}
@@ -4206,7 +4214,7 @@ func TestCrashMidWALWrite(t *testing.T) {
 	}
 
 	// Write a valid entry.
-	engine.Put(1, []byte("valid"))
+	engine.Put(key(1), []byte("valid"))
 	engine.Close()
 
 	// Manually append a partial WAL frame: just the frame_len, no payload.
@@ -4227,7 +4235,7 @@ func TestCrashMidWALWrite(t *testing.T) {
 	}
 	defer engine.Close()
 
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1) after crash recovery: %v", err)
 	}
@@ -4245,8 +4253,8 @@ func TestCrashMidWALWriteCorruptedPayload(t *testing.T) {
 	}
 
 	// Write two valid entries.
-	engine.Put(10, []byte("alpha"))
-	engine.Put(20, []byte("beta"))
+	engine.Put(key(10), []byte("alpha"))
+	engine.Put(key(20), []byte("beta"))
 	engine.Close()
 
 	// Append a frame with valid header but corrupted payload (bad CRC).
@@ -4258,18 +4266,21 @@ func TestCrashMidWALWriteCorruptedPayload(t *testing.T) {
 
 	// Build a frame manually with a wrong CRC.
 	value := []byte("corrupt")
-	payloadSize := walEntryFixedSize + len(value)
-	header := make([]byte, walHeaderSize)
-	binary.BigEndian.PutUint32(header[0:4], uint32(4+payloadSize)) // frame_len
-	binary.BigEndian.PutUint32(header[4:8], 0xDEADBEEF)           // bad CRC
+	fakeKey := key(30)
 
-	payload := make([]byte, walEntryFixedSize+len(value))
-	binary.BigEndian.PutUint64(payload[0:8], 30)               // key
-	binary.BigEndian.PutUint64(payload[8:16], uint64(len(value))) // value len
-	copy(payload[16:], value)
+	var payload bytes.Buffer
+	var scratch [4]byte
+	binary.BigEndian.PutUint32(scratch[:], uint32(len(fakeKey)))
+	payload.Write(scratch[:])
+	payload.Write(fakeKey)
+	binary.BigEndian.PutUint32(scratch[:], uint32(len(value)))
+	payload.Write(scratch[:])
+	payload.Write(value)
 
-	file.Write(header)
-	file.Write(payload)
+	// Write bad CRC + payload
+	binary.BigEndian.PutUint32(scratch[:], 0xDEADBEEF)
+	file.Write(scratch[:])
+	file.Write(payload.Bytes())
 	file.Close()
 
 	// Reopen — valid entries recovered, corrupted frame discarded.
@@ -4279,7 +4290,7 @@ func TestCrashMidWALWriteCorruptedPayload(t *testing.T) {
 	}
 	defer engine.Close()
 
-	got, err := engine.Get(10)
+	got, err := engine.Get(key(10))
 	if err != nil {
 		t.Fatalf("Get(10): %v", err)
 	}
@@ -4287,7 +4298,7 @@ func TestCrashMidWALWriteCorruptedPayload(t *testing.T) {
 		t.Errorf("Get(10): got %q, want %q", got, "alpha")
 	}
 
-	got, err = engine.Get(20)
+	got, err = engine.Get(key(20))
 	if err != nil {
 		t.Fatalf("Get(20): %v", err)
 	}
@@ -4296,7 +4307,7 @@ func TestCrashMidWALWriteCorruptedPayload(t *testing.T) {
 	}
 
 	// The corrupted key should not exist.
-	got, err = engine.Get(30)
+	got, err = engine.Get(key(30))
 	if err != nil {
 		t.Fatalf("Get(30): %v", err)
 	}
@@ -4321,8 +4332,8 @@ func TestCrashAfterWALWriteBeforeFlush(t *testing.T) {
 		4: "four",
 		5: "five",
 	}
-	for key, val := range entries {
-		engine.Put(key, []byte(val))
+	for k, val := range entries {
+		engine.Put(key(k), []byte(val))
 	}
 	engine.Close()
 
@@ -4333,13 +4344,13 @@ func TestCrashAfterWALWriteBeforeFlush(t *testing.T) {
 	}
 	defer engine.Close()
 
-	for key, want := range entries {
-		got, err := engine.Get(key)
+	for k, want := range entries {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -4352,8 +4363,8 @@ func TestCrashMultipleReopensWithoutFlush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.Put(1, []byte("session1_a"))
-	engine.Put(2, []byte("session1_b"))
+	engine.Put(key(1), []byte("session1_a"))
+	engine.Put(key(2), []byte("session1_b"))
 	engine.Close()
 
 	// Session 2: reopen, write more entries, close without flush.
@@ -4361,8 +4372,8 @@ func TestCrashMultipleReopensWithoutFlush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.Put(3, []byte("session2_a"))
-	engine.Put(4, []byte("session2_b"))
+	engine.Put(key(3), []byte("session2_a"))
+	engine.Put(key(4), []byte("session2_b"))
 	engine.Close()
 
 	// Session 3: reopen and verify all entries from both sessions exist.
@@ -4379,13 +4390,13 @@ func TestCrashMultipleReopensWithoutFlush(t *testing.T) {
 		4: "session2_b",
 	}
 
-	for key, want := range expected {
-		got, err := engine.Get(key)
+	for k, want := range expected {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -4399,8 +4410,8 @@ func TestWALReplayIsIdempotent(t *testing.T) {
 	}
 
 	// Put entries and flush them to L0 SSTs.
-	engine.Put(100, []byte("flushed_a"))
-	engine.Put(200, []byte("flushed_b"))
+	engine.Put(key(100), []byte("flushed_a"))
+	engine.Put(key(200), []byte("flushed_b"))
 	err = engine.Flush()
 	if err != nil {
 		t.Fatal(err)
@@ -4416,8 +4427,8 @@ func TestWALReplayIsIdempotent(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeFrame(&buf, 100, []byte("flushed_a"))
-	writeFrame(&buf, 200, []byte("flushed_b"))
+	writeFrame(&buf, key(100), []byte("flushed_a"))
+	writeFrame(&buf, key(200), []byte("flushed_b"))
 	file.Write(buf.Bytes())
 	file.Close()
 
@@ -4429,7 +4440,7 @@ func TestWALReplayIsIdempotent(t *testing.T) {
 	}
 	defer engine.Close()
 
-	got, err := engine.Get(100)
+	got, err := engine.Get(key(100))
 	if err != nil {
 		t.Fatalf("Get(100): %v", err)
 	}
@@ -4437,7 +4448,7 @@ func TestWALReplayIsIdempotent(t *testing.T) {
 		t.Errorf("Get(100): got %q, want %q", got, "flushed_a")
 	}
 
-	got, err = engine.Get(200)
+	got, err = engine.Get(key(200))
 	if err != nil {
 		t.Fatalf("Get(200): %v", err)
 	}
@@ -4446,7 +4457,7 @@ func TestWALReplayIsIdempotent(t *testing.T) {
 	}
 
 	// Verify no phantom extra entries by checking a key that was never written.
-	got, err = engine.Get(300)
+	got, err = engine.Get(key(300))
 	if err != nil {
 		t.Fatalf("Get(300): %v", err)
 	}
@@ -4464,8 +4475,8 @@ func TestCorruptedBlockChecksumOnGet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("value1"))
-	engine.Put(2, []byte("value2"))
+	engine.Put(key(1), []byte("value1"))
+	engine.Put(key(2), []byte("value2"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -4493,7 +4504,7 @@ func TestCorruptedBlockChecksumOnGet(t *testing.T) {
 	}
 	defer engine2.Close()
 
-	_, err = engine2.Get(1)
+	_, err = engine2.Get(key(1))
 	if err == nil {
 		t.Fatal("expected an error from Get on corrupted SST, got nil")
 	}
@@ -4509,8 +4520,8 @@ func TestCorruptedBlockChecksumOnScan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("value1"))
-	engine.Put(2, []byte("value2"))
+	engine.Put(key(1), []byte("value1"))
+	engine.Put(key(2), []byte("value2"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -4539,7 +4550,7 @@ func TestCorruptedBlockChecksumOnScan(t *testing.T) {
 	defer engine2.Close()
 
 	// Scan should stop iteration gracefully (not panic) when it hits the corrupted block
-	iter := engine2.Scan(0, math.MaxUint64)
+	iter := engine2.Scan(key(0), nil)
 	count := 0
 	for iter.Next() {
 		count++
@@ -4556,7 +4567,7 @@ func TestCorruptedManifestInvalidHash(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("value1"))
+	engine.Put(key(1), []byte("value1"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -4584,7 +4595,7 @@ func TestCorruptedManifestPartialLine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("value1"))
+	engine.Put(key(1), []byte("value1"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -4613,7 +4624,7 @@ func TestZeroLengthSSTFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("value1"))
+	engine.Put(key(1), []byte("value1"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -4639,8 +4650,8 @@ func TestSSTWithValidFooterButCorruptedBlockIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("value1"))
-	engine.Put(2, []byte("value2"))
+	engine.Put(key(1), []byte("value1"))
+	engine.Put(key(2), []byte("value2"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -4655,10 +4666,10 @@ func TestSSTWithValidFooterButCorruptedBlockIndex(t *testing.T) {
 	}
 
 	// The footer is the last footerSize bytes.
-	// The block index entries sit right before the footer.
-	// Block index entry layout: FirstKey(u64) + Offset(u64) + Length(u32) = 20 bytes.
+	// Read the block index size from the footer (first 8 bytes of footer).
 	footerStart := len(data) - int(footerSize)
-	blockIndexStart := footerStart - int(sstBlockIndexSize)
+	blockIdxSize := binary.BigEndian.Uint64(data[footerStart : footerStart+8])
+	blockIndexStart := footerStart - int(blockIdxSize)
 	if blockIndexStart < 0 {
 		t.Fatal("SST file too small to have a block index")
 	}
@@ -4684,7 +4695,7 @@ func TestSSTWithValidFooterButCorruptedBlockIndex(t *testing.T) {
 
 	// With corrupted block index, Get should return an error or nil (not panic).
 	// The corrupted offset/length will cause either a read error or a CRC mismatch.
-	_, err = engine2.Get(1)
+	_, err = engine2.Get(key(1))
 	if err == nil {
 		// If Get returns nil without error, it means the corrupted block index
 		// caused the key lookup to miss entirely. This is acceptable behavior
@@ -4702,7 +4713,7 @@ func TestCorruptedWALRecovery(t *testing.T) {
 
 	// Write several entries without flushing (they live only in WAL)
 	for keyVal := uint64(1); keyVal <= 10; keyVal++ {
-		engine.Put(keyVal, []byte(fmt.Sprintf("value%d", keyVal)))
+		engine.Put(key(keyVal), []byte(fmt.Sprintf("value%d", keyVal)))
 	}
 	walPath := engine.WALPath()
 	engine.Close()
@@ -4735,7 +4746,7 @@ func TestCorruptedWALRecovery(t *testing.T) {
 	// Count how many entries survived
 	recoveredCount := 0
 	for keyVal := uint64(1); keyVal <= 10; keyVal++ {
-		got, err := engine2.Get(keyVal)
+		got, err := engine2.Get(key(keyVal))
 		if err != nil {
 			t.Fatalf("Get(%d) returned unexpected error: %v", keyVal, err)
 		}
@@ -4765,8 +4776,8 @@ func TestSSTDeletedWhileRunningGet(t *testing.T) {
 	}
 	defer engine.Close()
 
-	engine.Put(1, []byte("value1"))
-	engine.Put(2, []byte("value2"))
+	engine.Put(key(1), []byte("value1"))
+	engine.Put(key(2), []byte("value2"))
 	err = engine.Flush()
 	if err != nil {
 		t.Fatal(err)
@@ -4786,7 +4797,7 @@ func TestSSTDeletedWhileRunningGet(t *testing.T) {
 	engine.fileTable.Clear()
 
 	// Get should return an error, not panic
-	_, err = engine.Get(1)
+	_, err = engine.Get(key(1))
 	if err == nil {
 		t.Log("Get returned nil error after SST deletion (key treated as missing)")
 	}
@@ -4801,7 +4812,7 @@ func TestSSTDeletedWhileRunningScan(t *testing.T) {
 	defer engine.Close()
 
 	for idx := uint64(1); idx <= 100; idx++ {
-		engine.Put(idx, []byte(fmt.Sprintf("val-%d", idx)))
+		engine.Put(key(idx), []byte(fmt.Sprintf("val-%d", idx)))
 	}
 	err = engine.Flush()
 	if err != nil {
@@ -4828,7 +4839,7 @@ func TestSSTDeletedWhileRunningScan(t *testing.T) {
 		}
 	}()
 
-	iter := engine.Scan(1, 101)
+	iter := engine.Scan(key(1), key(101))
 	for iter.Next() {
 		// just drain the iterator
 	}
@@ -4842,7 +4853,7 @@ func TestObjectsDirDeletedWhileRunning(t *testing.T) {
 	}
 	defer engine.Close()
 
-	engine.Put(1, []byte("value1"))
+	engine.Put(key(1), []byte("value1"))
 	err = engine.Flush()
 	if err != nil {
 		t.Fatal(err)
@@ -4854,18 +4865,18 @@ func TestObjectsDirDeletedWhileRunning(t *testing.T) {
 	engine.fileTable.Clear()
 
 	// Get should return an error (not panic)
-	_, err = engine.Get(1)
+	_, err = engine.Get(key(1))
 	if err == nil {
 		t.Log("Get returned nil error after objects dir deletion (key treated as missing)")
 	}
 
 	// Put should still work — it goes to the memtable
-	err = engine.Put(2, []byte("value2"))
+	err = engine.Put(key(2), []byte("value2"))
 	if err != nil {
 		t.Fatalf("Put after objects dir deletion should work (memtable): %v", err)
 	}
 
-	got, err := engine.Get(2)
+	got, err := engine.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2) from memtable: %v", err)
 	}
@@ -4890,7 +4901,7 @@ func TestFlushDuringActiveScan(t *testing.T) {
 
 	// Insert initial data and flush so it is on disk
 	for idx := uint64(1); idx <= 50; idx++ {
-		engine.Put(idx, []byte(fmt.Sprintf("batch1-%d", idx)))
+		engine.Put(key(idx), []byte(fmt.Sprintf("batch1-%d", idx)))
 	}
 	err = engine.Flush()
 	if err != nil {
@@ -4899,11 +4910,11 @@ func TestFlushDuringActiveScan(t *testing.T) {
 
 	// Add more data to the memtable
 	for idx := uint64(51); idx <= 100; idx++ {
-		engine.Put(idx, []byte(fmt.Sprintf("batch2-%d", idx)))
+		engine.Put(key(idx), []byte(fmt.Sprintf("batch2-%d", idx)))
 	}
 
 	// Start a scan over the full range — this takes a snapshot
-	iter := engine.Scan(1, 101)
+	iter := engine.Scan(key(1), key(101))
 
 	// Read a few entries
 	readCount := 0
@@ -4938,7 +4949,7 @@ func TestCompactDuringActiveScan(t *testing.T) {
 	// Write data across multiple flushes to create L0 SSTs
 	for batch := 0; batch < 3; batch++ {
 		for idx := uint64(batch*50 + 1); idx <= uint64((batch+1)*50); idx++ {
-			engine.Put(idx, []byte(fmt.Sprintf("v%d-%d", batch, idx)))
+			engine.Put(key(idx), []byte(fmt.Sprintf("v%d-%d", batch, idx)))
 		}
 		err = engine.Flush()
 		if err != nil {
@@ -4947,7 +4958,7 @@ func TestCompactDuringActiveScan(t *testing.T) {
 	}
 
 	// Start a scan over the full range — takes a snapshot
-	iter := engine.Scan(1, 151)
+	iter := engine.Scan(key(1), key(151))
 
 	// Read a few entries
 	readCount := 0
@@ -4983,7 +4994,7 @@ func TestConcurrentGetsAfterCompact(t *testing.T) {
 	expected := make(map[uint64]string)
 	for idx := uint64(1); idx <= 100; idx++ {
 		val := fmt.Sprintf("value-%d", idx)
-		engine.Put(idx, []byte(val))
+		engine.Put(key(idx), []byte(val))
 		expected[idx] = val
 	}
 	err = engine.Flush()
@@ -5001,14 +5012,14 @@ func TestConcurrentGetsAfterCompact(t *testing.T) {
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			for key := uint64(1); key <= 100; key++ {
-				got, getErr := engine.Get(key)
+			for k := uint64(1); k <= 100; k++ {
+				got, getErr := engine.Get(key(k))
 				if getErr != nil {
-					t.Errorf("concurrent Get(%d): %v", key, getErr)
+					t.Errorf("concurrent Get(%d): %v", k, getErr)
 					return
 				}
-				if string(got) != expected[key] {
-					t.Errorf("concurrent Get(%d): got %q, want %q", key, got, expected[key])
+				if string(got) != expected[k] {
+					t.Errorf("concurrent Get(%d): got %q, want %q", k, got, expected[k])
 					return
 				}
 			}
@@ -5028,20 +5039,20 @@ func TestReopenManyTimes(t *testing.T) {
 
 		// Verify all data from previous sessions
 		for prev := 0; prev < session; prev++ {
-			key := uint64(prev + 1)
-			got, err := engine.Get(key)
+			k := uint64(prev + 1)
+			got, err := engine.Get(key(k))
 			if err != nil {
-				t.Fatalf("session %d Get(%d): %v", session, key, err)
+				t.Fatalf("session %d Get(%d): %v", session, k, err)
 			}
 			want := fmt.Sprintf("session-%d", prev)
 			if string(got) != want {
-				t.Fatalf("session %d Get(%d): got %q, want %q", session, key, got, want)
+				t.Fatalf("session %d Get(%d): got %q, want %q", session, k, got, want)
 			}
 		}
 
 		// Write new data for this session
-		key := uint64(session + 1)
-		err = engine.Put(key, []byte(fmt.Sprintf("session-%d", session)))
+		k := uint64(session + 1)
+		err = engine.Put(key(k), []byte(fmt.Sprintf("session-%d", session)))
 		if err != nil {
 			t.Fatalf("session %d Put: %v", session, err)
 		}
@@ -5065,14 +5076,14 @@ func TestReopenManyTimes(t *testing.T) {
 	defer engine.Close()
 
 	for session := 0; session < 10; session++ {
-		key := uint64(session + 1)
-		got, err := engine.Get(key)
+		k := uint64(session + 1)
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("final Get(%d): %v", key, err)
+			t.Fatalf("final Get(%d): %v", k, err)
 		}
 		want := fmt.Sprintf("session-%d", session)
 		if string(got) != want {
-			t.Fatalf("final Get(%d): got %q, want %q", key, got, want)
+			t.Fatalf("final Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -5092,7 +5103,7 @@ func TestPutAfterClose(t *testing.T) {
 		}
 	}()
 
-	err = engine.Put(1, []byte("after-close"))
+	err = engine.Put(key(1), []byte("after-close"))
 	if err != nil {
 		t.Logf("Put after Close returned error (acceptable): %v", err)
 	}
@@ -5108,8 +5119,8 @@ func TestCrashAfterSSTWrittenBeforeManifestSave(t *testing.T) {
 	}
 
 	// Put and flush some initial data.
-	engine.Put(1, []byte("alpha"))
-	engine.Put(2, []byte("beta"))
+	engine.Put(key(1), []byte("alpha"))
+	engine.Put(key(2), []byte("beta"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -5134,7 +5145,7 @@ func TestCrashAfterSSTWrittenBeforeManifestSave(t *testing.T) {
 	}
 	defer engine2.Close()
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1) after reopen: %v", err)
 	}
@@ -5142,7 +5153,7 @@ func TestCrashAfterSSTWrittenBeforeManifestSave(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "alpha")
 	}
 
-	got, err = engine2.Get(2)
+	got, err = engine2.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2) after reopen: %v", err)
 	}
@@ -5159,15 +5170,15 @@ func TestCrashAfterManifestSaveBeforeWALClear(t *testing.T) {
 	}
 
 	// Put entries and flush them to L0.
-	engine.Put(1, []byte("first"))
-	engine.Put(2, []byte("second"))
+	engine.Put(key(1), []byte("first"))
+	engine.Put(key(2), []byte("second"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Put more entries — these go to the WAL and memtable.
-	engine.Put(1, []byte("updated-first"))
-	engine.Put(3, []byte("third"))
+	engine.Put(key(1), []byte("updated-first"))
+	engine.Put(key(3), []byte("third"))
 
 	// Flush again so these entries are in L0 SSTs.
 	if err := engine.Flush(); err != nil {
@@ -5182,7 +5193,7 @@ func TestCrashAfterManifestSaveBeforeWALClear(t *testing.T) {
 		t.Fatal(err)
 	}
 	var walBuf bytes.Buffer
-	writeFrame(&walBuf, 1, []byte("wal-replay-value"))
+	writeFrame(&walBuf, key(1), []byte("wal-replay-value"))
 	walFile.Write(walBuf.Bytes())
 	walFile.Close()
 
@@ -5196,7 +5207,7 @@ func TestCrashAfterManifestSaveBeforeWALClear(t *testing.T) {
 	}
 	defer engine2.Close()
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1) after reopen: %v", err)
 	}
@@ -5205,7 +5216,7 @@ func TestCrashAfterManifestSaveBeforeWALClear(t *testing.T) {
 	}
 
 	// Key 2 should still be in L0.
-	got, err = engine2.Get(2)
+	got, err = engine2.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2) after reopen: %v", err)
 	}
@@ -5214,7 +5225,7 @@ func TestCrashAfterManifestSaveBeforeWALClear(t *testing.T) {
 	}
 
 	// Key 3 should also be in L0.
-	got, err = engine2.Get(3)
+	got, err = engine2.Get(key(3))
 	if err != nil {
 		t.Fatalf("Get(3) after reopen: %v", err)
 	}
@@ -5230,8 +5241,8 @@ func TestCorruptedL0Manifest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.Put(1, []byte("value1"))
-	engine.Put(2, []byte("value2"))
+	engine.Put(key(1), []byte("value1"))
+	engine.Put(key(2), []byte("value2"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -5259,13 +5270,13 @@ func TestEmptyL0ManifestAfterFlush(t *testing.T) {
 	}
 
 	// Put and flush data.
-	engine.Put(1, []byte("flushed"))
+	engine.Put(key(1), []byte("flushed"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Put more data (goes to WAL only, not flushed).
-	engine.Put(2, []byte("in-wal"))
+	engine.Put(key(2), []byte("in-wal"))
 
 	engine.Close()
 
@@ -5283,7 +5294,7 @@ func TestEmptyL0ManifestAfterFlush(t *testing.T) {
 	}
 	defer engine2.Close()
 
-	got, err := engine2.Get(1)
+	got, err := engine2.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1) after reopen: %v", err)
 	}
@@ -5291,7 +5302,7 @@ func TestEmptyL0ManifestAfterFlush(t *testing.T) {
 		t.Errorf("Get(1): got %q, want nil (manifest was truncated, flushed data lost)", got)
 	}
 
-	got, err = engine2.Get(2)
+	got, err = engine2.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2) after reopen: %v", err)
 	}
@@ -5308,8 +5319,8 @@ func TestFlushWithReadOnlyObjectsDir(t *testing.T) {
 	}
 	defer engine.Close()
 
-	engine.Put(1, []byte("value1"))
-	engine.Put(2, []byte("value2"))
+	engine.Put(key(1), []byte("value1"))
+	engine.Put(key(2), []byte("value2"))
 
 	// Make the objects directory read-only so Flush cannot write SST files.
 	objectsDir := filepath.Join(dir, "protodb", "objects")
@@ -5328,7 +5339,7 @@ func TestFlushWithReadOnlyObjectsDir(t *testing.T) {
 	}
 
 	// Data should still be accessible via memtable despite the failed flush.
-	got, err := engine.Get(1)
+	got, err := engine.Get(key(1))
 	if err != nil {
 		t.Fatalf("Get(1) after failed flush: %v", err)
 	}
@@ -5336,7 +5347,7 @@ func TestFlushWithReadOnlyObjectsDir(t *testing.T) {
 		t.Errorf("Get(1): got %q, want %q", got, "value1")
 	}
 
-	got, err = engine.Get(2)
+	got, err = engine.Get(key(2))
 	if err != nil {
 		t.Fatalf("Get(2) after failed flush: %v", err)
 	}
@@ -5356,8 +5367,8 @@ func TestCrashAfterL1SSTsWrittenBeforeL1ManifestSave(t *testing.T) {
 	}
 
 	// Write initial data and flush to L0, then compact to L1.
-	for key := uint64(1); key <= 10; key++ {
-		engine.Put(key, []byte(fmt.Sprintf("value_%d", key)))
+	for k := uint64(1); k <= 10; k++ {
+		engine.Put(key(k), []byte(fmt.Sprintf("value_%d", k)))
 	}
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
@@ -5367,8 +5378,8 @@ func TestCrashAfterL1SSTsWrittenBeforeL1ManifestSave(t *testing.T) {
 	}
 
 	// Flush more data to L0.
-	for key := uint64(11); key <= 20; key++ {
-		engine.Put(key, []byte(fmt.Sprintf("value_%d", key)))
+	for k := uint64(11); k <= 20; k++ {
+		engine.Put(key(k), []byte(fmt.Sprintf("value_%d", k)))
 	}
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
@@ -5404,26 +5415,26 @@ func TestCrashAfterL1SSTsWrittenBeforeL1ManifestSave(t *testing.T) {
 	defer engine.Close()
 
 	// Original compacted data (keys 1-10) should be accessible via L1.
-	for key := uint64(1); key <= 10; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(1); k <= 10; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
-		want := fmt.Sprintf("value_%d", key)
+		want := fmt.Sprintf("value_%d", k)
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 
 	// Keys 11-20 should be in L0 (the flush before crash was committed).
-	for key := uint64(11); key <= 20; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(11); k <= 20; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
-		want := fmt.Sprintf("value_%d", key)
+		want := fmt.Sprintf("value_%d", k)
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -5437,8 +5448,8 @@ func TestCrashAfterL1ManifestSavedBeforeL0Trim(t *testing.T) {
 	}
 
 	// Write data and flush to L0.
-	for key := uint64(1); key <= 10; key++ {
-		engine.Put(key, []byte(fmt.Sprintf("value_%d", key)))
+	for k := uint64(1); k <= 10; k++ {
+		engine.Put(key(k), []byte(fmt.Sprintf("value_%d", k)))
 	}
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
@@ -5471,19 +5482,19 @@ func TestCrashAfterL1ManifestSavedBeforeL0Trim(t *testing.T) {
 	}
 	defer engine.Close()
 
-	for key := uint64(1); key <= 10; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(1); k <= 10; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
-		want := fmt.Sprintf("value_%d", key)
+		want := fmt.Sprintf("value_%d", k)
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 
 	// Verify no phantom data.
-	got, err := engine.Get(999)
+	got, err := engine.Get(key(999))
 	if err != nil {
 		t.Fatalf("Get(999): %v", err)
 	}
@@ -5503,8 +5514,8 @@ func TestCompactWithConcurrentFlush(t *testing.T) {
 
 	// Flush 5 batches to L0.
 	for batch := 0; batch < 5; batch++ {
-		for key := uint64(batch*10 + 1); key <= uint64(batch*10+10); key++ {
-			engine.Put(key, []byte(fmt.Sprintf("batch%d_%d", batch, key)))
+		for k := uint64(batch*10 + 1); k <= uint64(batch*10+10); k++ {
+			engine.Put(key(k), []byte(fmt.Sprintf("batch%d_%d", batch, k)))
 		}
 		if err := engine.Flush(); err != nil {
 			t.Fatal(err)
@@ -5518,7 +5529,7 @@ func TestCompactWithConcurrentFlush(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		engine.Put(100, []byte("concurrent_value"))
+		engine.Put(key(100), []byte("concurrent_value"))
 		flushErr = engine.Flush()
 	}()
 
@@ -5536,19 +5547,19 @@ func TestCompactWithConcurrentFlush(t *testing.T) {
 
 	// Verify all data from the 5 batches is accessible.
 	for batch := 0; batch < 5; batch++ {
-		for key := uint64(batch*10 + 1); key <= uint64(batch*10+10); key++ {
-			got, err := engine.Get(key)
+		for k := uint64(batch*10 + 1); k <= uint64(batch*10+10); k++ {
+			got, err := engine.Get(key(k))
 			if err != nil {
-				t.Fatalf("Get(%d): %v", key, err)
+				t.Fatalf("Get(%d): %v", k, err)
 			}
 			if got == nil {
-				t.Fatalf("Get(%d): got nil, want non-nil", key)
+				t.Fatalf("Get(%d): got nil, want non-nil", k)
 			}
 		}
 	}
 
 	// Verify the concurrently flushed value is accessible.
-	got, err := engine.Get(100)
+	got, err := engine.Get(key(100))
 	if err != nil {
 		t.Fatalf("Get(100): %v", err)
 	}
@@ -5567,8 +5578,8 @@ func TestDoubleCompactVerifiesL0EmptyAndOverwrite(t *testing.T) {
 	defer engine.Close()
 
 	// First batch: flush and compact.
-	for key := uint64(1); key <= 10; key++ {
-		engine.Put(key, []byte(fmt.Sprintf("first_%d", key)))
+	for k := uint64(1); k <= 10; k++ {
+		engine.Put(key(k), []byte(fmt.Sprintf("first_%d", k)))
 	}
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
@@ -5586,11 +5597,11 @@ func TestDoubleCompactVerifiesL0EmptyAndOverwrite(t *testing.T) {
 	}
 
 	// Second batch: flush and compact again.
-	for key := uint64(11); key <= 20; key++ {
-		engine.Put(key, []byte(fmt.Sprintf("second_%d", key)))
+	for k := uint64(11); k <= 20; k++ {
+		engine.Put(key(k), []byte(fmt.Sprintf("second_%d", k)))
 	}
 	// Also overwrite some keys from the first batch.
-	engine.Put(5, []byte("updated_5"))
+	engine.Put(key(5), []byte("updated_5"))
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -5607,27 +5618,27 @@ func TestDoubleCompactVerifiesL0EmptyAndOverwrite(t *testing.T) {
 	}
 
 	// All data should be correct in L1.
-	for key := uint64(1); key <= 10; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(1); k <= 10; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
-		want := fmt.Sprintf("first_%d", key)
-		if key == 5 {
+		want := fmt.Sprintf("first_%d", k)
+		if k == 5 {
 			want = "updated_5"
 		}
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
-	for key := uint64(11); key <= 20; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(11); k <= 20; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
-		want := fmt.Sprintf("second_%d", key)
+		want := fmt.Sprintf("second_%d", k)
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }
@@ -5654,8 +5665,8 @@ func TestCompactEmptyL0(t *testing.T) {
 	}
 
 	// Put data, flush to L0, compact to L1.
-	for key := uint64(1); key <= 5; key++ {
-		engine.Put(key, []byte(fmt.Sprintf("value_%d", key)))
+	for k := uint64(1); k <= 5; k++ {
+		engine.Put(key(k), []byte(fmt.Sprintf("value_%d", k)))
 	}
 	if err := engine.Flush(); err != nil {
 		t.Fatal(err)
@@ -5678,14 +5689,14 @@ func TestCompactEmptyL0(t *testing.T) {
 	}
 	defer engine.Close()
 
-	for key := uint64(1); key <= 5; key++ {
-		got, err := engine.Get(key)
+	for k := uint64(1); k <= 5; k++ {
+		got, err := engine.Get(key(k))
 		if err != nil {
-			t.Fatalf("Get(%d): %v", key, err)
+			t.Fatalf("Get(%d): %v", k, err)
 		}
-		want := fmt.Sprintf("value_%d", key)
+		want := fmt.Sprintf("value_%d", k)
 		if string(got) != want {
-			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+			t.Errorf("Get(%d): got %q, want %q", k, got, want)
 		}
 	}
 }

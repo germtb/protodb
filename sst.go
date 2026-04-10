@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 )
 
@@ -26,43 +25,40 @@ var (
 
 /*
 
-This struct holds the metadata part of an sst, that is, everything
-except the values. This makes it very small in memory.
-The layout for an sst  is:
+SST layout:
 
 ┌─────────────────────┐
-│   blocks            │  each is padded to 4Kb, but can be larger
+│   blocks            │  each is ~4Kb, but can be larger
 ├─────────────────────┤
-│   metadata          │  extensible metadata section. It does not need a known offset because it is always at sstByteSize - footerSize - keysSize
+│   blockIndex        │  variable-length entries: key_len(u32) | key | offset(u64) | length(u32)
 ├─────────────────────┤
-│   blockIndex        │  each is a tuple like (firstKey(u64), blockOffset(u64), blockLength(u32))
-├─────────────────────┤
+│   blockIndexSize    │  byte size of blockIndex section (u64)
 │   blockCount        │  number of blocks (u64)
 │   version           │  (u16)
 └─────────────────────┘
 
-This is the block layout
+Block layout:
 
-┌─────────────────────────────────┐
-│   key(u64) | len(u32) | value   │
-│   key(u64) | len(u32) | value   │
-│   key(u64) | len(u32) | value   │
-│   padded to 4KB - footerSize    │
-├─────────────────────────────────┤
-│   entryCount(u16) | crc32(u32)  │
-└─────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│   key_len(u32) | key | value_len(u32) | value    │
+│   key_len(u32) | key | value_len(u32) | value    │
+│   ...                                            │
+├──────────────────────────────────────────────────┤
+│   entryCount(u16) | crc32(u32)                   │
+└──────────────────────────────────────────────────┘
 
 */
 
 type sstBlockIndex struct {
-	FirstKey uint64
+	FirstKey Key
 	Offset   uint64
 	Length   uint32
 }
 
 type sstFooter struct {
-	BlockCount uint64
-	Version    uint16
+	BlockIndexSize uint64
+	BlockCount     uint64
+	Version        uint16
 }
 
 type sstBlock struct {
@@ -70,7 +66,6 @@ type sstBlock struct {
 }
 
 type sst struct {
-	index      uint64
 	cacheMutex sync.Mutex
 	cache      *LRU[uint64, sstBlock]
 	blocks     []sstBlockIndex
@@ -78,7 +73,7 @@ type sst struct {
 	hash       string
 	path       string
 	fileSize   int64
-	firstKey   uint64
+	firstKey   Key
 }
 
 type reader interface {
@@ -88,12 +83,8 @@ type reader interface {
 const sstVersion uint16 = 1
 const tombstone uint32 = 0xFFFFFFFF
 
-var footerSize int64 = int64(binary.Size(sstFooter{}))
-var sstBlockIndexSize int64 = int64(binary.Size(sstBlockIndex{}))
-var keySize int64 = 8 // uint64
-var lenSize int64 = 4 // uint32
-var keyLenSize int64 = keySize + lenSize
-var blockFooterSize int64 = 6 // uint16 + uint64
+var footerSize int64 = 8 + 8 + 2 // BlockIndexSize + BlockCount + Version
+var blockFooterSize int64 = 6    // entryCount(u16) + crc32(u32)
 
 type ReaderOptions struct {
 	TailByteSize int64
@@ -102,32 +93,63 @@ type ReaderOptions struct {
 var BlockSize int = 1024 * 4       // 4Kb
 var SSTSize int = 1024 * 1024 * 16 // 16 Mb
 
-func WriteSST(path string, entries Iterator) ([]*sst, error) {
-	tempfile, err := os.CreateTemp(path, "-temp-")
+func sha256Sum(data []byte) []byte {
+	sum := sha256.Sum256(data)
+	return sum[:]
+}
 
-	if err != nil {
-		return nil, err
+func writeBlockIndex(writer io.Writer, index sstBlockIndex) {
+	var buf [16]byte // key_len(4) + offset(8) + length(4)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(len(index.FirstKey)))
+	writer.Write(buf[0:4])
+	writer.Write(index.FirstKey)
+	binary.BigEndian.PutUint64(buf[0:8], index.Offset)
+	binary.BigEndian.PutUint32(buf[8:12], index.Length)
+	writer.Write(buf[0:12])
+}
+
+func readBlockIndex(reader *bytes.Reader) (sstBlockIndex, error) {
+	var buf [12]byte // key_len(4) + offset(8) or offset(8) + length(4)
+
+	if _, err := io.ReadFull(reader, buf[0:4]); err != nil {
+		return sstBlockIndex{}, err
+	}
+	keyLen := binary.BigEndian.Uint32(buf[0:4])
+
+	key := make([]byte, keyLen)
+	if _, err := io.ReadFull(reader, key); err != nil {
+		return sstBlockIndex{}, err
 	}
 
-	defer func() {
-		tempfile.Close()
-		os.Remove(tempfile.Name())
-	}()
+	if _, err := io.ReadFull(reader, buf[0:12]); err != nil {
+		return sstBlockIndex{}, err
+	}
+	offset := binary.BigEndian.Uint64(buf[0:8])
+	length := binary.BigEndian.Uint32(buf[8:12])
 
+	return sstBlockIndex{FirstKey: key, Offset: offset, Length: length}, nil
+}
+
+func WriteSST(path string, entries Iterator) ([]*sst, error) {
+	var ssts []*sst
+	var buf bytes.Buffer
+	buf.Grow(BlockSize)
 	var block bytes.Buffer
 	block.Grow(BlockSize)
-	var blocks = make([]sstBlockIndex, 0)
-	var ssts = make([]*sst, 0)
+	var blocks []sstBlockIndex
 	var blockEntries uint16 = 0
-	var lastKey uint64 = 0
-	var firstKey uint64 = 0
+	var lastKey Key
+	var firstKey Key
 	var offset uint64 = 0
 	var firstIteration bool = true
 
-	finishBlock := func() error {
-		binary.Write(&block, binary.BigEndian, blockEntries)
+	finishBlock := func() {
+		var footer [6]byte // entryCount(2) + crc32(4)
+		binary.BigEndian.PutUint16(footer[0:2], blockEntries)
+		block.Write(footer[0:2])
 		checksum := crc32.ChecksumIEEE(block.Bytes())
-		binary.Write(&block, binary.BigEndian, checksum)
+		binary.BigEndian.PutUint32(footer[2:6], checksum)
+		block.Write(footer[2:6])
 
 		blocks = append(blocks, sstBlockIndex{
 			FirstKey: firstKey,
@@ -135,53 +157,62 @@ func WriteSST(path string, entries Iterator) ([]*sst, error) {
 			Length:   uint32(block.Len()),
 		})
 
-		_, err := tempfile.Write(block.Bytes())
-
-		if err != nil {
-			return err
-		}
-
+		buf.Write(block.Bytes())
 		offset += uint64(block.Len())
 		blockEntries = 0
 
 		block = bytes.Buffer{}
 		block.Grow(BlockSize)
-
-		return nil
 	}
 
 	finishSST := func() error {
 		if blockEntries > 0 {
-			err = finishBlock()
-
-			if err != nil {
-				return err
-			}
+			finishBlock()
 		}
 
+		// Write variable-length block index
+		blockIndexStart := buf.Len()
 		for _, blockIndex := range blocks {
-			binary.Write(tempfile, binary.BigEndian, blockIndex)
+			writeBlockIndex(&buf, blockIndex)
 		}
+		blockIndexSize := uint64(buf.Len() - blockIndexStart)
 
 		footer := sstFooter{
-			BlockCount: uint64(len(blocks)),
-			Version:    sstVersion,
+			BlockIndexSize: blockIndexSize,
+			BlockCount:     uint64(len(blocks)),
+			Version:        sstVersion,
 		}
 
-		binary.Write(tempfile, binary.BigEndian, footer)
+		var footerBuf [18]byte // BlockIndexSize(8) + BlockCount(8) + Version(2)
+		binary.BigEndian.PutUint64(footerBuf[0:8], footer.BlockIndexSize)
+		binary.BigEndian.PutUint64(footerBuf[8:16], footer.BlockCount)
+		binary.BigEndian.PutUint16(footerBuf[16:18], footer.Version)
+		buf.Write(footerBuf[:])
 
-		if err = tempfile.Sync(); err != nil {
+		// Hash the complete SST content
+		hash := hex.EncodeToString(sha256Sum(buf.Bytes()))
+
+		// Write to temp file, sync, rename
+		tempfile, err := os.CreateTemp(path, "-temp-")
+		if err != nil {
+			return err
+		}
+		defer func() {
+			tempfile.Close()
+			os.Remove(tempfile.Name())
+		}()
+
+		_, err = tempfile.Write(buf.Bytes())
+		if err != nil {
+			return err
+		}
+		err = tempfile.Sync()
+		if err != nil {
 			return err
 		}
 
-		tempfile.Seek(0, 0)
-		hasher := sha256.New()
-		io.Copy(hasher, tempfile)
-		hash := hex.EncodeToString(hasher.Sum(nil))
-
 		finalPath := filepath.Join(path, hash)
 		err = os.Rename(tempfile.Name(), finalPath)
-
 		if err != nil {
 			return err
 		}
@@ -192,61 +223,61 @@ func WriteSST(path string, entries Iterator) ([]*sst, error) {
 			footer:   footer,
 			hash:     hash,
 			path:     finalPath,
-			fileSize: int64(offset) + int64(len(blocks))*sstBlockIndexSize + footerSize,
+			fileSize: int64(buf.Len()),
 			firstKey: blocks[0].FirstKey,
 		})
 
+		// Reset for next SST
+		buf.Reset()
 		offset = 0
-		firstKey = 0
+		firstKey = nil
 		firstIteration = true
-		blocks = make([]sstBlockIndex, 0)
-		tempfile, err = os.CreateTemp(path, "-temp-")
+		blocks = nil
 
-		return err
+		return nil
 	}
 
-	// First write all the blocks. Whenever a block exceeds 4Kb we finish it and
-	// start a new one.
 	for entries.Next() {
 		key := entries.Key()
 		value := entries.Value()
 
 		// This is to ensure entries are in sorted order
-		if !firstIteration && key <= lastKey {
-			return nil, fmt.Errorf("%w: %d <= %d", ErrUnsortedKeys, key, lastKey)
+		if !firstIteration && bytes.Compare(key, lastKey) <= 0 {
+			return nil, fmt.Errorf("%w: %v <= %v", ErrUnsortedKeys, key, lastKey)
 		} else {
 			firstIteration = false
 			lastKey = key
 		}
 
 		if block.Len() > BlockSize {
-			err = finishBlock()
-
-			if err != nil {
-				return nil, err
-			}
+			finishBlock()
 		}
 
-		fileSize := int64(offset) + int64(len(blocks))*sstBlockIndexSize + footerSize
+		// Estimate file size for SST partitioning
+		fileSize := int64(offset) + footerSize
 
 		if fileSize > int64(SSTSize) {
-			err = finishSST()
-
-			if err != nil {
+			if err := finishSST(); err != nil {
 				return nil, err
 			}
 		}
 
 		if blockEntries == 0 {
-			firstKey = key
+			firstKey = append(Key(nil), key...) // copy the key
 		}
 
+		// Write entry: key_len(u32) | key | value_len(u32) | value
+		var scratch [4]byte
+		binary.BigEndian.PutUint32(scratch[:], uint32(len(key)))
+		block.Write(scratch[:])
+		block.Write(key)
 		if value == nil {
-			binary.Write(&block, binary.BigEndian, key)
-			binary.Write(&block, binary.BigEndian, tombstone)
+			binary.BigEndian.PutUint32(scratch[:], tombstone)
 		} else {
-			binary.Write(&block, binary.BigEndian, key)
-			binary.Write(&block, binary.BigEndian, uint32(len(value)))
+			binary.BigEndian.PutUint32(scratch[:], uint32(len(value)))
+		}
+		block.Write(scratch[:])
+		if value != nil {
 			block.Write(value)
 		}
 
@@ -254,9 +285,7 @@ func WriteSST(path string, entries Iterator) ([]*sst, error) {
 	}
 
 	if blockEntries > 0 || len(blocks) > 0 {
-		err = finishSST()
-
-		if err != nil {
+		if err := finishSST(); err != nil {
 			return nil, err
 		}
 	}
@@ -278,64 +307,51 @@ func ReadSST(path string, hash string, options *ReaderOptions) (*sst, error) {
 	}
 	fileSize := info.Size()
 
-	// We optimisitcally read the last 64Kb, because most ssts will not have that many entries
-	var tailByteSize int64 = 64 * 1024
-
-	if options != nil {
-		tailByteSize = options.TailByteSize
-	}
-
-	if tailByteSize < footerSize {
-		return nil, ErrTailTooSmall
-	}
-
-	if tailByteSize > fileSize {
-		tailByteSize = fileSize
-	}
-	if tailByteSize < footerSize {
+	// Read the footer first
+	if fileSize < footerSize {
 		return nil, fmt.Errorf("%w: file too small (%d bytes)", ErrCorrupted, fileSize)
 	}
-	tail := make([]byte, tailByteSize)
-	if _, err := file.ReadAt(tail, fileSize-tailByteSize); err != nil {
+
+	footerBuf := make([]byte, footerSize)
+	if _, err := file.ReadAt(footerBuf, fileSize-footerSize); err != nil {
 		return nil, err
 	}
 
 	var footer sstFooter
-	if err = binary.Read(bytes.NewReader(tail[int64(len(tail))-footerSize:]), binary.BigEndian, &footer); err != nil {
-		return nil, err
-	}
+	footer.BlockIndexSize = binary.BigEndian.Uint64(footerBuf[0:8])
+	footer.BlockCount = binary.BigEndian.Uint64(footerBuf[8:16])
+	footer.Version = binary.BigEndian.Uint16(footerBuf[16:18])
 
 	if footer.Version != sstVersion {
 		return nil, fmt.Errorf("%w: got %d, want %d", ErrUnsupportedVersion, footer.Version, sstVersion)
 	}
 
-	// We optimistically loaded a tail of a certain size, so we need to check if the block index is larger than that.
-	// Guard against overflow and corruption: the block index + footer must fit within the file.
-	maxEntries := uint64(fileSize-footerSize) / uint64(sstBlockIndexSize)
-	if footer.BlockCount > maxEntries {
-		return nil, fmt.Errorf("%w: footer claims %d entries but file can hold at most %d", ErrCorrupted, footer.BlockCount, maxEntries)
+	// Read the block index
+	blockIndexEnd := fileSize - footerSize
+	blockIndexStart := blockIndexEnd - int64(footer.BlockIndexSize)
+
+	if blockIndexStart < 0 {
+		return nil, fmt.Errorf("%w: block index size %d exceeds file size %d", ErrCorrupted, footer.BlockIndexSize, fileSize)
 	}
 
-	var neededBytes int64 = footerSize + int64(footer.BlockCount)*sstBlockIndexSize
-
-	if neededBytes > fileSize {
-		return nil, fmt.Errorf("%w: footer claims %d entries but file is only %d bytes", ErrCorrupted, footer.BlockCount, fileSize)
-	}
-
-	if neededBytes > tailByteSize {
-		tail = make([]byte, neededBytes)
-		tailByteSize = neededBytes
-		if _, err := file.ReadAt(tail, fileSize-neededBytes); err != nil {
-			return nil, err
-		}
-	}
-
-	blocksStart := int64(len(tail)) - footerSize - int64(footer.BlockCount)*sstBlockIndexSize
-	blocksEnd := int64(len(tail)) - footerSize
-	var blocks = make([]sstBlockIndex, footer.BlockCount)
-
-	if err = binary.Read(bytes.NewReader(tail[blocksStart:blocksEnd]), binary.BigEndian, &blocks); err != nil {
+	blockIndexBuf := make([]byte, footer.BlockIndexSize)
+	if _, err := file.ReadAt(blockIndexBuf, blockIndexStart); err != nil {
 		return nil, err
+	}
+
+	blockIndexReader := bytes.NewReader(blockIndexBuf)
+	blocks := make([]sstBlockIndex, 0, footer.BlockCount)
+	for range footer.BlockCount {
+		blockIndex, err := readBlockIndex(blockIndexReader)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to read block index", ErrCorrupted)
+		}
+		blocks = append(blocks, blockIndex)
+	}
+
+	var firstKey Key
+	if len(blocks) > 0 {
+		firstKey = blocks[0].FirstKey
 	}
 
 	return &sst{
@@ -345,20 +361,8 @@ func ReadSST(path string, hash string, options *ReaderOptions) (*sst, error) {
 		hash:     hash,
 		path:     path,
 		fileSize: fileSize,
-		firstKey: blocks[0].FirstKey,
+		firstKey: firstKey,
 	}, nil
-}
-
-func (s *sst) FirstKey() uint64 {
-	if len(s.blocks) == 0 {
-		return 0
-	}
-
-	return s.blocks[0].FirstKey
-}
-
-func (s *sst) valuesEnd() int64 {
-	return s.fileSize - footerSize - int64(s.footer.BlockCount)*int64(sstBlockIndexSize)
 }
 
 func (s *sst) GetBlock(blockIndex uint64, reader reader) (*sstBlock, error) {
@@ -393,42 +397,66 @@ func (s *sst) GetBlock(blockIndex uint64, reader reader) (*sstBlock, error) {
 	return &result, nil
 }
 
-func (s *sst) Get(key uint64, reader reader) ([]byte, error) {
-	blockIndex := sort.Search(len(s.blocks), func(i int) bool {
-		return s.blocks[i].FirstKey > key
-	}) - 1
+// readEntry reads a single entry from block data at the given position.
+// Returns key, value_len, total bytes consumed. value_len == tombstone means deleted.
+func readEntry(data []byte, pos int64) (key Key, valueLen uint32, entrySize int64, err error) {
+	if pos+4 > int64(len(data)) {
+		return nil, 0, 0, ErrCorrupted
+	}
+	keyLen := binary.BigEndian.Uint32(data[pos : pos+4])
+	pos += 4
 
-	if blockIndex < 0 {
+	if pos+int64(keyLen)+4 > int64(len(data)) {
+		return nil, 0, 0, ErrCorrupted
+	}
+	key = data[pos : pos+int64(keyLen)]
+	pos += int64(keyLen)
+
+	valueLen = binary.BigEndian.Uint32(data[pos : pos+4])
+	pos += 4
+
+	entrySize = 4 + int64(keyLen) + 4
+	if valueLen != tombstone {
+		entrySize += int64(valueLen)
+	}
+
+	return key, valueLen, entrySize, nil
+}
+
+func (s *sst) Get(key Key, reader reader) ([]byte, error) {
+	// Binary search on block index to find the right block
+	blockIdx := bsearchBlock(s.blocks, key) - 1
+
+	if blockIdx < 0 {
 		return nil, ErrNotFound
 	}
 
-	block, err := s.GetBlock(uint64(blockIndex), reader)
+	block, err := s.GetBlock(uint64(blockIdx), reader)
 	if err != nil {
 		return nil, err
 	}
 
-	// Linear scan within the block to find the key
-	// Block layout: [key(u64) | len(u32) | value(len)] ... [count(u16) | crc32(u32)]
+	// Linear scan within the block
 	data := block.data
 	pos := int64(0)
 	end := int64(len(data)) - blockFooterSize
 
-	for pos <= end-keyLenSize {
-		entryKey := binary.BigEndian.Uint64(data[pos : pos+keySize])
-		entryLen := binary.BigEndian.Uint32(data[pos+keySize : pos+keyLenSize])
+	for pos < end {
+		entryKey, valueLen, entrySize, err := readEntry(data, pos)
+		if err != nil {
+			return nil, err
+		}
 
-		if entryKey == key {
-			if entryLen == tombstone {
+		cmp := bytes.Compare(entryKey, key)
+		if cmp == 0 {
+			if valueLen == tombstone {
 				return nil, ErrDeleted
 			}
-			return data[pos+keyLenSize : pos+keyLenSize+int64(entryLen)], nil
+			valueStart := pos + entrySize - int64(valueLen)
+			return data[valueStart : valueStart+int64(valueLen)], nil
 		}
 
-		if entryLen == tombstone {
-			pos += keyLenSize
-		} else {
-			pos += keyLenSize + int64(entryLen)
-		}
+		pos += entrySize
 	}
 
 	return nil, ErrNotFound
@@ -437,21 +465,19 @@ func (s *sst) Get(key uint64, reader reader) ([]byte, error) {
 type sstIterator struct {
 	sst        *sst
 	reader     reader
-	lo         uint64
-	hi         uint64
+	lo         Key
+	hi         Key
 	blockIndex int
 	block      *sstBlock
 	pos        int64
 	end        int64
-	key        uint64
+	key        Key
 	value      []byte
 	done       bool
 }
 
-func (s *sst) Iterator(lo uint64, hi uint64, r reader) *sstIterator {
-	blockIndex := sort.Search(len(s.blocks), func(i int) bool {
-		return s.blocks[i].FirstKey > lo
-	}) - 1
+func (s *sst) Iterator(lo Key, hi Key, r reader) *sstIterator {
+	blockIndex := bsearchBlock(s.blocks, lo) - 1
 
 	if blockIndex < 0 {
 		blockIndex = 0
@@ -490,44 +516,58 @@ func (it *sstIterator) Next() bool {
 		}
 
 		// Advance to next block if current is exhausted
-		if it.pos > it.end-keyLenSize {
+		if it.pos >= it.end {
 			it.blockIndex++
 			it.block = nil
 			continue
 		}
 
 		data := it.block.data
-		entryKey := binary.BigEndian.Uint64(data[it.pos : it.pos+keySize])
-		entryLen := binary.BigEndian.Uint32(data[it.pos+keySize : it.pos+keyLenSize])
-
-		// Advance position
-		if entryLen == tombstone {
-			it.pos += keyLenSize
-		} else {
-			it.pos += keyLenSize + int64(entryLen)
-		}
-
-		if entryKey >= it.hi {
+		entryKey, valueLen, entrySize, err := readEntry(data, it.pos)
+		if err != nil {
 			it.done = true
 			return false
 		}
 
-		if entryKey >= it.lo {
+		it.pos += entrySize
+
+		if it.hi != nil && bytes.Compare(entryKey, it.hi) >= 0 {
+			it.done = true
+			return false
+		}
+
+		if it.lo == nil || bytes.Compare(entryKey, it.lo) >= 0 {
 			it.key = entryKey
-			if entryLen == tombstone {
+			if valueLen == tombstone {
 				it.value = nil
 			} else {
-				it.value = data[it.pos-int64(entryLen) : it.pos]
+				valueStart := it.pos - int64(valueLen)
+				it.value = data[valueStart:it.pos]
 			}
 			return true
 		}
 	}
 }
 
-func (it *sstIterator) Key() uint64 {
+func (it *sstIterator) Key() Key {
 	return it.key
 }
 
 func (it *sstIterator) Value() []byte {
 	return it.value
+}
+
+// bsearchBlock returns the index of the first block whose FirstKey > key.
+// Subtract 1 to get the block that could contain the key.
+func bsearchBlock(blocks []sstBlockIndex, key Key) int {
+	lo, hi := 0, len(blocks)
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if bytes.Compare(blocks[mid].FirstKey, key) <= 0 {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo
 }

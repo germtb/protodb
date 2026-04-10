@@ -3,7 +3,6 @@ package protodb
 import (
 	"bytes"
 	"errors"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -49,15 +48,24 @@ func newLevel(path string, name string) (*Level, error) {
 	}, nil
 }
 
-func Open(path string) (*Engine, error) {
+type Options struct {
+	WALBufferSize int
+}
+
+func Open(path string, opts ...Options) (*Engine, error) {
 	path = filepath.Join(path, "protodb")
+
+	walBufferSize := 0
+	if len(opts) > 0 {
+		walBufferSize = opts[0].WALBufferSize
+	}
 
 	err := os.MkdirAll(filepath.Join(path, "objects"), 0755)
 	if err != nil {
 		return nil, err
 	}
 
-	wal, err := newWAL(filepath.Join(path, "wal"))
+	wal, err := newWAL(filepath.Join(path, "wal"), walBufferSize)
 	if err != nil {
 		return nil, err
 	}
@@ -106,19 +114,19 @@ func (e *Engine) Close() error {
 	return e.wal.Close()
 }
 
-func (e *Engine) Put(key uint64, value []byte) error {
+func (e *Engine) Put(key Key, value []byte) error {
 	tx := e.Transaction()
 	tx.Put(key, value)
 	return tx.Apply()
 }
 
-func (e *Engine) Delete(key uint64) error {
+func (e *Engine) Delete(key Key) error {
 	tx := e.Transaction()
 	tx.Delete(key)
 	return tx.Apply()
 }
 
-func (e *Engine) GetInSST(s *sst, key uint64) ([]byte, error) {
+func (e *Engine) GetInSST(s *sst, key Key) ([]byte, error) {
 	handle, err := e.fileTable.getOrOpen(s.path)
 	if err != nil {
 		return nil, err
@@ -141,7 +149,7 @@ func (e *Engine) GetInSST(s *sst, key uint64) ([]byte, error) {
 	}
 }
 
-func (e *Engine) Get(key uint64) ([]byte, error) {
+func (e *Engine) Get(key Key) ([]byte, error) {
 	e.flushMutex.RLock()
 	defer e.flushMutex.RUnlock()
 
@@ -171,15 +179,16 @@ func (e *Engine) Get(key uint64) ([]byte, error) {
 		}
 	}
 
-	sstIndex := sort.Search(len(e.l1.ssts), func(i int) bool {
-		return e.l1.ssts[i].FirstKey() > key
+	// Binary search on L1 SSTs
+	index := sort.Search(len(e.l1.ssts), func(i int) bool {
+		return bytes.Compare(e.l1.ssts[i].firstKey, key) > 0
 	}) - 1
 
-	if sstIndex < 0 {
+	if index < 0 || index >= len(e.l1.ssts) {
 		return nil, nil
 	}
 
-	value, err = e.GetInSST(e.l1.ssts[sstIndex], key)
+	value, err = e.GetInSST(e.l1.ssts[index], key)
 
 	if errors.Is(err, ErrNotFound) {
 		return nil, nil
@@ -193,7 +202,7 @@ func (e *Engine) Get(key uint64) ([]byte, error) {
 }
 
 type mergeEntry struct {
-	key    uint64
+	key    Key
 	value  []byte
 	index  int
 	source Iterator
@@ -201,15 +210,16 @@ type mergeEntry struct {
 
 type mergeIterator struct {
 	heap    Heap[mergeEntry]
-	key     uint64
+	key     Key
 	value   []byte
 	started bool
 }
 
 func newMergeIterator(sources []Iterator) *mergeIterator {
 	heap := newHeap(func(a mergeEntry, b mergeEntry) bool {
-		if a.key != b.key {
-			return a.key < b.key
+		cmp := bytes.Compare(a.key, b.key)
+		if cmp != 0 {
+			return cmp < 0
 		}
 		return a.index < b.index // lower index = newer source wins
 	})
@@ -243,7 +253,7 @@ func (it *mergeIterator) Next() bool {
 		}
 
 		// Skip duplicate keys — we already yielded from a newer source
-		if it.started && entry.key == it.key {
+		if it.started && bytes.Equal(entry.key, it.key) {
 			continue
 		}
 		it.key = entry.key
@@ -260,7 +270,7 @@ func (it *mergeIterator) Next() bool {
 	return false
 }
 
-func (it *mergeIterator) Key() uint64 {
+func (it *mergeIterator) Key() Key {
 	return it.key
 }
 
@@ -268,7 +278,7 @@ func (it *mergeIterator) Value() []byte {
 	return it.value
 }
 
-func (e *Engine) Scan(lo, hi uint64) *mergeIterator {
+func (e *Engine) Scan(lo, hi Key) *mergeIterator {
 	// Clone mutates COW flags, so it needs an exclusive lock. It's O(1).
 	e.flushMutex.Lock()
 	snapshot := e.memtable.Clone()
@@ -281,7 +291,7 @@ func (e *Engine) Scan(lo, hi uint64) *mergeIterator {
 	return e.scan(lo, hi, snapshot.Scan(lo, hi), l0ssts, l1ssts)
 }
 
-func (e *Engine) scan(lo, hi uint64, memSource Iterator, l0ssts []*sst, l1ssts []*sst) *mergeIterator {
+func (e *Engine) scan(lo, hi Key, memSource Iterator, l0ssts []*sst, l1ssts []*sst) *mergeIterator {
 	sources := []Iterator{memSource}
 	for _, s := range l0ssts {
 		handle, err := e.fileTable.getOrOpen(s.path)
@@ -292,7 +302,7 @@ func (e *Engine) scan(lo, hi uint64, memSource Iterator, l0ssts []*sst, l1ssts [
 	}
 
 	for _, s := range l1ssts {
-		if s.FirstKey() >= hi {
+		if hi != nil && bytes.Compare(s.firstKey, hi) >= 0 {
 			break
 		}
 
@@ -337,7 +347,7 @@ func (e *Engine) Flush() error {
 type emptyIterator struct{}
 
 func (it *emptyIterator) Next() bool    { return false }
-func (it *emptyIterator) Key() uint64   { return 0 }
+func (it *emptyIterator) Key() Key      { return nil }
 func (it *emptyIterator) Value() []byte { return nil }
 
 func (e *Engine) Compact() error {
@@ -351,8 +361,8 @@ func (e *Engine) Compact() error {
 	e.flushMutex.Unlock()
 
 	entries := e.scan(
-		0,
-		math.MaxUint64,
+		nil,
+		nil,
 		&emptyIterator{},
 		l0ssts,
 		l1ssts,
@@ -394,7 +404,7 @@ func (e *Engine) Sync() error {
 }
 
 type txEntry struct {
-	key   uint64
+	key   Key
 	value []byte
 }
 
@@ -412,19 +422,20 @@ func (e *Engine) Transaction() Transaction {
 	}
 }
 
-func (tx *Transaction) Put(key uint64, value []byte) {
+func (tx *Transaction) Put(key Key, value []byte) {
 	tx.entries = append(tx.entries, txEntry{key: key, value: value})
-	tx.byteSize += len(value)
+	tx.byteSize += len(key) + len(value)
 }
 
-func (tx *Transaction) Delete(key uint64) {
+func (tx *Transaction) Delete(key Key) {
 	tx.entries = append(tx.entries, txEntry{key: key, value: nil})
+	tx.byteSize += len(key)
 }
 
-func (tx *Transaction) Get(key uint64) ([]byte, error) {
+func (tx *Transaction) Get(key Key) ([]byte, error) {
 	// Scan backwards — last write wins
 	for idx := len(tx.entries) - 1; idx >= 0; idx-- {
-		if tx.entries[idx].key == key {
+		if bytes.Equal(tx.entries[idx].key, key) {
 			if tx.entries[idx].value == nil {
 				return nil, nil // deleted
 			}
@@ -437,19 +448,19 @@ func (tx *Transaction) Get(key uint64) ([]byte, error) {
 func (tx *Transaction) Apply() error {
 	defer tx.engine.flushMutex.Unlock()
 
-	var buf bytes.Buffer
-	buf.Grow(tx.byteSize + len(tx.entries)*(walHeaderSize+walEntryFixedSize))
+	batch := tx.engine.wal.Batch()
 
 	for _, entry := range tx.entries {
-		writeFrame(&buf, entry.key, entry.value)
 		if entry.value == nil {
+			batch.Delete(entry.key)
 			tx.engine.memtable.Delete(entry.key)
 		} else {
+			batch.Put(entry.key, entry.value)
 			tx.engine.memtable.Put(entry.key, entry.value)
 		}
 	}
 
-	return tx.engine.wal.Write(buf.Bytes())
+	return batch.Commit()
 }
 
 func (tx *Transaction) Cancel() {

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/cockroachdb/pebble"
@@ -41,6 +42,21 @@ func uint64Key(key uint64) []byte {
 	return buf
 }
 
+// keyPool pre-allocates keys to avoid measuring allocation overhead in benchmarks.
+var keyPool [][]byte
+
+func init() {
+	const poolSize = 1_000_000
+	keyPool = make([][]byte, poolSize)
+	for idx := range keyPool {
+		keyPool[idx] = uint64Key(uint64(idx))
+	}
+}
+
+func poolKey(idx int) []byte {
+	return keyPool[idx%len(keyPool)]
+}
+
 func initPebble(b *testing.B) *pebble.DB {
 	b.Helper()
 	db, err := pebble.Open(filepath.Join(b.TempDir(), "pebble"), &pebble.Options{})
@@ -63,7 +79,7 @@ func initBadger(b *testing.B) *badger.DB {
 
 func initLSM(b *testing.B) *protodb.Engine {
 	b.Helper()
-	engine, err := protodb.Open(b.TempDir())
+	engine, err := protodb.Open(b.TempDir(), protodb.Options{WALBufferSize: 32 * 1024})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -116,7 +132,7 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 			for iter := 0; iter < b.N; iter++ {
 				tx := engine.Transaction()
 				for idx := 0; idx < batchSize; idx++ {
-					tx.Put(uint64(iter*batchSize+idx), val)
+					tx.Put(poolKey(iter*batchSize+idx), val)
 				}
 				if err := tx.Apply(); err != nil {
 					b.Fatal(err)
@@ -132,7 +148,7 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 			for iter := 0; iter < b.N; iter++ {
 				batch := db.NewBatch()
 				for idx := 0; idx < batchSize; idx++ {
-					batch.Set(uint64Key(uint64(iter*batchSize+idx)), val, nil)
+					batch.Set(poolKey(iter*batchSize+idx), val, nil)
 				}
 				if err := batch.Commit(pebble.NoSync); err != nil {
 					b.Fatal(err)
@@ -148,7 +164,7 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 			for iter := 0; iter < b.N; iter++ {
 				txn := db.NewTransaction(true)
 				for idx := 0; idx < batchSize; idx++ {
-					txn.Set(uint64Key(uint64(iter*batchSize+idx)), val)
+					txn.Set(poolKey(iter*batchSize+idx), val)
 				}
 				if err := txn.Commit(); err != nil {
 					b.Fatal(err)
@@ -187,13 +203,13 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 		engine := initLSM(b)
 		defer engine.Close()
 		for idx := 0; idx < populateSize; idx++ {
-			engine.Put(uint64(idx), val)
+			engine.Put(uint64Key(uint64(idx)), val)
 		}
 		engine.Flush()
 		engine.Compact()
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
-			if _, err := engine.Get(uint64(iter % populateSize)); err != nil {
+			if _, err := engine.Get(poolKey(iter % populateSize)); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -207,7 +223,7 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 		}
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
-			v, closer, err := db.Get(uint64Key(uint64(iter % populateSize)))
+			v, closer, err := db.Get(poolKey(iter % populateSize))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -231,7 +247,7 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
 			txn := db.NewTransaction(false)
-			item, err := txn.Get(uint64Key(uint64(iter % populateSize)))
+			item, err := txn.Get(poolKey(iter % populateSize))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -279,14 +295,14 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 		engine := initLSM(b)
 		defer engine.Close()
 		for idx := 0; idx < populateSize; idx++ {
-			engine.Put(uint64(idx), val)
+			engine.Put(uint64Key(uint64(idx)), val)
 		}
 		engine.Flush()
 		engine.Compact()
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
 			count := 0
-			scanner := engine.Scan(0, 1000)
+			scanner := engine.Scan(poolKey(0), poolKey(1000))
 			for scanner.Next() {
 				count++
 			}
@@ -371,7 +387,7 @@ func BenchmarkSSTScaling(b *testing.B) {
 			// Write 100 entries per SST, flush each batch
 			for sst := 0; sst < sstCount; sst++ {
 				for idx := 0; idx < 100; idx++ {
-					engine.Put(uint64(sst*100+idx), val)
+					engine.Put(uint64Key(uint64(sst*100+idx)), val)
 				}
 				engine.Flush()
 			}
@@ -379,7 +395,7 @@ func BenchmarkSSTScaling(b *testing.B) {
 			totalKeys := uint64(sstCount * 100)
 			b.ResetTimer()
 			for iter := 0; iter < b.N; iter++ {
-				_, err := engine.Get(uint64(iter) % totalKeys)
+				_, err := engine.Get(poolKey(int(uint64(iter) % totalKeys)))
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -397,15 +413,17 @@ func BenchmarkSSTScaling(b *testing.B) {
 			}
 			for sst := 0; sst < sstCount; sst++ {
 				for idx := 0; idx < keysPerSST; idx++ {
-					engine.Put(uint64(sst*keysPerSST+idx), val)
+					engine.Put(uint64Key(uint64(sst*keysPerSST+idx)), val)
 				}
 				engine.Flush()
 			}
 
+			lo := poolKey(0)
+			hi := poolKey(sstCount * keysPerSST)
 			b.ResetTimer()
 			for iter := 0; iter < b.N; iter++ {
 				count := 0
-				scanner := engine.Scan(0, uint64(sstCount*keysPerSST))
+				scanner := engine.Scan(lo, hi)
 				for scanner.Next() {
 					count++
 				}
@@ -420,7 +438,7 @@ func BenchmarkSSTScaling(b *testing.B) {
 
 		for sst := 0; sst < 20; sst++ {
 			for idx := 0; idx < 100; idx++ {
-				engine.Put(uint64(sst*100+idx), val)
+				engine.Put(uint64Key(uint64(sst*100+idx)), val)
 			}
 			engine.Flush()
 		}
@@ -428,7 +446,7 @@ func BenchmarkSSTScaling(b *testing.B) {
 
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
-			_, err := engine.Get(uint64(iter) % 2000)
+			_, err := engine.Get(poolKey(iter % 2000))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -442,7 +460,7 @@ func BenchmarkSSTScaling(b *testing.B) {
 
 		for sst := 0; sst < 20; sst++ {
 			for idx := 0; idx < 50; idx++ {
-				engine.Put(uint64(sst*50+idx), val)
+				engine.Put(uint64Key(uint64(sst*50+idx)), val)
 			}
 			engine.Flush()
 		}
@@ -451,7 +469,7 @@ func BenchmarkSSTScaling(b *testing.B) {
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
 			count := 0
-			scanner := engine.Scan(0, 1000)
+			scanner := engine.Scan(poolKey(0), poolKey(1000))
 			for scanner.Next() {
 				count++
 			}
@@ -472,13 +490,13 @@ func BenchmarkL0vsL1(b *testing.B) {
 		defer engine.Close()
 		for sst := 0; sst < sstCount; sst++ {
 			for idx := 0; idx < keysPerSST; idx++ {
-				engine.Put(uint64(sst*keysPerSST+idx), val)
+				engine.Put(uint64Key(uint64(sst*keysPerSST+idx)), val)
 			}
 			engine.Flush()
 		}
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
-			engine.Get(uint64(iter) % totalKeys)
+			engine.Get(poolKey(int(uint64(iter) % totalKeys)))
 		}
 	})
 
@@ -487,14 +505,14 @@ func BenchmarkL0vsL1(b *testing.B) {
 		defer engine.Close()
 		for sst := 0; sst < sstCount; sst++ {
 			for idx := 0; idx < keysPerSST; idx++ {
-				engine.Put(uint64(sst*keysPerSST+idx), val)
+				engine.Put(uint64Key(uint64(sst*keysPerSST+idx)), val)
 			}
 			engine.Flush()
 		}
 		engine.Compact()
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
-			engine.Get(uint64(iter) % totalKeys)
+			engine.Get(poolKey(int(uint64(iter) % totalKeys)))
 		}
 	})
 
@@ -503,14 +521,14 @@ func BenchmarkL0vsL1(b *testing.B) {
 		defer engine.Close()
 		for sst := 0; sst < sstCount; sst++ {
 			for idx := 0; idx < keysPerSST; idx++ {
-				engine.Put(uint64(sst*keysPerSST+idx), val)
+				engine.Put(uint64Key(uint64(sst*keysPerSST+idx)), val)
 			}
 			engine.Flush()
 		}
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
 			count := 0
-			scanner := engine.Scan(0, 1000)
+			scanner := engine.Scan(poolKey(0), poolKey(1000))
 			for scanner.Next() {
 				count++
 			}
@@ -522,7 +540,7 @@ func BenchmarkL0vsL1(b *testing.B) {
 		defer engine.Close()
 		for sst := 0; sst < sstCount; sst++ {
 			for idx := 0; idx < keysPerSST; idx++ {
-				engine.Put(uint64(sst*keysPerSST+idx), val)
+				engine.Put(uint64Key(uint64(sst*keysPerSST+idx)), val)
 			}
 			engine.Flush()
 		}
@@ -530,7 +548,7 @@ func BenchmarkL0vsL1(b *testing.B) {
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
 			count := 0
-			scanner := engine.Scan(0, 1000)
+			scanner := engine.Scan(poolKey(0), poolKey(1000))
 			for scanner.Next() {
 				count++
 			}
@@ -552,7 +570,7 @@ func BenchmarkCompaction(b *testing.B) {
 
 				batchSize := 1000
 				for idx := 0; idx < entryCount; idx++ {
-					engine.Put(uint64(idx), val)
+					engine.Put(uint64Key(uint64(idx)), val)
 					if (idx+1)%batchSize == 0 {
 						engine.Flush()
 					}
@@ -611,7 +629,7 @@ func BenchmarkBlockSize(b *testing.B) {
 			b.ResetTimer()
 			for iter := 0; iter < b.N; iter++ {
 				for idx := 0; idx < 1000; idx++ {
-					engine.Put(uint64(iter*1000+idx), val)
+					engine.Put(poolKey(iter*1000+idx), val)
 				}
 				engine.Flush()
 			}
@@ -624,13 +642,13 @@ func BenchmarkBlockSize(b *testing.B) {
 			engine := initLSM(b)
 			defer engine.Close()
 			for idx := 0; idx < populateSize; idx++ {
-				engine.Put(uint64(idx), val)
+				engine.Put(uint64Key(uint64(idx)), val)
 			}
 			engine.Flush()
 			engine.Compact()
 			b.ResetTimer()
 			for iter := 0; iter < b.N; iter++ {
-				engine.Get(uint64(iter % populateSize))
+				engine.Get(poolKey(iter % populateSize))
 			}
 		})
 
@@ -641,14 +659,14 @@ func BenchmarkBlockSize(b *testing.B) {
 			engine := initLSM(b)
 			defer engine.Close()
 			for idx := 0; idx < populateSize; idx++ {
-				engine.Put(uint64(idx), val)
+				engine.Put(uint64Key(uint64(idx)), val)
 			}
 			engine.Flush()
 			engine.Compact()
 			b.ResetTimer()
 			for iter := 0; iter < b.N; iter++ {
 				count := 0
-				scanner := engine.Scan(0, 1000)
+				scanner := engine.Scan(poolKey(0), poolKey(1000))
 				for scanner.Next() {
 					count++
 				}
@@ -671,13 +689,13 @@ func BenchmarkPartitionedSST(b *testing.B) {
 		engine := initLSM(b)
 		defer engine.Close()
 		for idx := 0; idx < entryCount; idx++ {
-			engine.Put(uint64(idx), bigVal)
+			engine.Put(uint64Key(uint64(idx)), bigVal)
 		}
 		engine.Flush()
 		engine.Compact()
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
-			_, err := engine.Get(uint64(iter % entryCount))
+			_, err := engine.Get(poolKey(iter % entryCount))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -688,14 +706,14 @@ func BenchmarkPartitionedSST(b *testing.B) {
 		engine := initLSM(b)
 		defer engine.Close()
 		for idx := 0; idx < entryCount; idx++ {
-			engine.Put(uint64(idx), bigVal)
+			engine.Put(uint64Key(uint64(idx)), bigVal)
 		}
 		engine.Flush()
 		engine.Compact()
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
 			count := 0
-			scanner := engine.Scan(0, uint64(entryCount))
+			scanner := engine.Scan(poolKey(0), poolKey(entryCount))
 			for scanner.Next() {
 				count++
 			}
@@ -707,7 +725,7 @@ func BenchmarkPartitionedSST(b *testing.B) {
 			b.StopTimer()
 			engine := initLSM(b)
 			for idx := 0; idx < entryCount; idx++ {
-				engine.Put(uint64(idx), bigVal)
+				engine.Put(uint64Key(uint64(idx)), bigVal)
 			}
 			engine.Flush()
 			b.StartTimer()
@@ -726,7 +744,7 @@ func BenchmarkPartitionedSST(b *testing.B) {
 		db.Flush()
 		b.ResetTimer()
 		for iter := 0; iter < b.N; iter++ {
-			v, closer, err := db.Get(uint64Key(uint64(iter % entryCount)))
+			v, closer, err := db.Get(poolKey(iter % entryCount))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -755,4 +773,70 @@ func BenchmarkPartitionedSST(b *testing.B) {
 			it.Close()
 		}
 	})
+}
+
+// TestMemoryFootprint measures heap memory used by each engine after loading data.
+func TestMemoryFootprint(t *testing.T) {
+	val := make([]byte, 100)
+	for idx := range val {
+		val[idx] = byte(idx)
+	}
+	const entryCount = 10000
+
+	measure := func() uint64 {
+		runtime.GC()
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		return mem.HeapInuse
+	}
+
+	// --- LSM ---
+	before := measure()
+	engine, err := protodb.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for idx := 0; idx < entryCount; idx++ {
+		engine.Put(uint64Key(uint64(idx)), val)
+	}
+	engine.Flush()
+	engine.Compact()
+	lsmHeap := measure() - before
+	t.Logf("LSM:    %d KB heap (%d entries)", lsmHeap/1024, entryCount)
+	engine.Close()
+
+	// --- Pebble ---
+	before = measure()
+	db, err := pebble.Open(filepath.Join(t.TempDir(), "pebble"), &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for idx := 0; idx < entryCount; idx++ {
+		db.Set(uint64Key(uint64(idx)), val, pebble.NoSync)
+	}
+	db.Flush()
+	pebbleHeap := measure() - before
+	t.Logf("Pebble: %d KB heap (%d entries)", pebbleHeap/1024, entryCount)
+	db.Close()
+
+	// --- Badger ---
+	before = measure()
+	opts := badger.DefaultOptions(filepath.Join(t.TempDir(), "badger"))
+	opts.Logger = nil
+	bdb, err := badger.Open(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn := bdb.NewTransaction(true)
+	for idx := 0; idx < entryCount; idx++ {
+		txn.Set(uint64Key(uint64(idx)), val)
+		if idx%500 == 0 {
+			txn.Commit()
+			txn = bdb.NewTransaction(true)
+		}
+	}
+	txn.Commit()
+	badgerHeap := measure() - before
+	t.Logf("Badger: %d KB heap (%d entries)", badgerHeap/1024, entryCount)
+	bdb.Close()
 }
