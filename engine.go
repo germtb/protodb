@@ -134,10 +134,6 @@ func (e *Engine) GetInSST(s *sst, key Key) ([]byte, error) {
 
 	value, err := s.Get(key, handle)
 
-	if err == nil {
-		return value, nil
-	}
-
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrNotFound
 	} else if errors.Is(err, ErrDeleted) {
@@ -152,7 +148,152 @@ func (e *Engine) GetInSST(s *sst, key Key) ([]byte, error) {
 func (e *Engine) Get(key Key) ([]byte, error) {
 	e.flushMutex.RLock()
 	defer e.flushMutex.RUnlock()
+	return e.getLocked(key)
+}
 
+// BulkGet retrieves multiple keys in a single operation.
+// Returns values aligned with the input keys: result[i] is the value for keys[i].
+// Missing keys (and tombstones) have nil values in the result.
+//
+// The implementation processes keys in sorted order so each storage source
+// (memtable, L0 SSTs, L1 SSTs) is walked at most once across the entire batch.
+func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
+	n := len(keys)
+	if n == 0 {
+		return nil, nil
+	}
+
+	e.flushMutex.RLock()
+	defer e.flushMutex.RUnlock()
+
+	// Build a permutation that sorts the keys without copying them.
+	// indices[i] is the original index of the i-th sorted key.
+	indices := make([]int, n)
+	for i := range indices {
+		indices[i] = i
+	}
+	sort.Slice(indices, func(i, j int) bool {
+		return bytes.Compare(keys[indices[i]], keys[indices[j]]) < 0
+	})
+
+	// Build sortedKeys slice for SST.BulkGet which requires a sorted []Key.
+	sortedKeys := make([]Key, n)
+	for i := range n {
+		sortedKeys[i] = keys[indices[i]]
+	}
+
+	// Parallel arrays aligned with sortedKeys.
+	sortedDst := make([][]byte, n)
+	resolved := make([]bool, n)
+
+	// 1. Memtable (highest precedence)
+	for i := range n {
+		value, err := e.memtable.Get(sortedKeys[i])
+		if err == nil {
+			sortedDst[i] = value
+			resolved[i] = true
+		} else if errors.Is(err, ErrDeleted) {
+			resolved[i] = true // tombstone — don't fall through
+		} else if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+	}
+
+	// 2. L0 SSTs (newest first)
+	for _, s := range e.l0.ssts {
+		handle, err := e.fileTable.getOrOpen(s.path)
+		if err != nil {
+			return nil, err
+		}
+		values, errs, err := s.BulkGet(sortedKeys, handle)
+		if err != nil {
+			return nil, err
+		}
+		for i := range n {
+			if resolved[i] {
+				continue
+			}
+			if errs[i] == nil {
+				sortedDst[i] = values[i]
+				resolved[i] = true
+			} else if errors.Is(errs[i], ErrDeleted) {
+				resolved[i] = true
+			}
+		}
+	}
+
+	// 3. L1 SSTs (sorted, non-overlapping). Bucket remaining keys by SST.
+	startIdx := 0
+	for keyIdx := 0; keyIdx < n; {
+		if resolved[keyIdx] {
+			keyIdx++
+			continue
+		}
+
+		k := sortedKeys[keyIdx]
+
+		// Binary search [startIdx:] for the SST containing k
+		ssts := e.l1.ssts[startIdx:]
+		offset := sort.Search(len(ssts), func(i int) bool {
+			return bytes.Compare(ssts[i].firstKey, k) > 0
+		}) - 1
+		sstIdx := startIdx + offset
+
+		if sstIdx < 0 {
+			keyIdx++
+			continue
+		}
+
+		// Determine how many subsequent keys belong to this SST.
+		var nextFirstKey Key
+		if sstIdx+1 < len(e.l1.ssts) {
+			nextFirstKey = e.l1.ssts[sstIdx+1].firstKey
+		}
+
+		batchEnd := keyIdx + 1
+		for batchEnd < n {
+			if nextFirstKey != nil && bytes.Compare(sortedKeys[batchEnd], nextFirstKey) >= 0 {
+				break
+			}
+			batchEnd++
+		}
+
+		s := e.l1.ssts[sstIdx]
+		handle, err := e.fileTable.getOrOpen(s.path)
+		if err != nil {
+			return nil, err
+		}
+		values, errs, err := s.BulkGet(sortedKeys[keyIdx:batchEnd], handle)
+		if err != nil {
+			return nil, err
+		}
+		for i := keyIdx; i < batchEnd; i++ {
+			if resolved[i] {
+				continue
+			}
+			localIdx := i - keyIdx
+			if errs[localIdx] == nil {
+				sortedDst[i] = values[localIdx]
+				resolved[i] = true
+			} else if errors.Is(errs[localIdx], ErrDeleted) {
+				resolved[i] = true
+			}
+		}
+
+		keyIdx = batchEnd
+		startIdx = sstIdx
+	}
+
+	// Map sorted results back to original input order
+	result := make([][]byte, n)
+	for i := range n {
+		result[indices[i]] = sortedDst[i]
+	}
+	return result, nil
+}
+
+// getLocked performs a Get without acquiring the lock. Caller must hold flushMutex.
+func (e *Engine) getLocked(key Key) ([]byte, error) {
 	value, err := e.memtable.Get(key)
 
 	if errors.Is(err, ErrNotFound) {
@@ -175,7 +316,7 @@ func (e *Engine) Get(key Key) ([]byte, error) {
 		} else if err != nil {
 			return nil, err
 		} else {
-			return value, err
+			return value, nil
 		}
 	}
 
@@ -278,7 +419,7 @@ func (it *mergeIterator) Value() []byte {
 	return it.value
 }
 
-func (e *Engine) Scan(lo, hi Key) *mergeIterator {
+func (e *Engine) Scan(lo, hi Key) Iterator {
 	// Clone mutates COW flags, so it needs an exclusive lock. It's O(1).
 	e.flushMutex.Lock()
 	snapshot := e.memtable.Clone()
@@ -291,8 +432,12 @@ func (e *Engine) Scan(lo, hi Key) *mergeIterator {
 	return e.scan(lo, hi, snapshot.Scan(lo, hi), l0ssts, l1ssts)
 }
 
-func (e *Engine) scan(lo, hi Key, memSource Iterator, l0ssts []*sst, l1ssts []*sst) *mergeIterator {
-	sources := []Iterator{memSource}
+func (e *Engine) scan(lo, hi Key, memSource Iterator, l0ssts []*sst, l1ssts []*sst) Iterator {
+	var sources []Iterator
+	if memSource != nil {
+		sources = []Iterator{memSource}
+	}
+
 	for _, s := range l0ssts {
 		handle, err := e.fileTable.getOrOpen(s.path)
 		if err != nil {
@@ -301,18 +446,21 @@ func (e *Engine) scan(lo, hi Key, memSource Iterator, l0ssts []*sst, l1ssts []*s
 		sources = append(sources, s.Iterator(lo, hi, handle))
 	}
 
-	for _, s := range l1ssts {
-		if hi != nil && bytes.Compare(s.firstKey, hi) >= 0 {
-			break
+	// L1 SSTs are non-overlapping and sorted, so we walk them as a single
+	// concatenated source instead of pushing each into the merge heap.
+	if len(l1ssts) > 0 {
+		opener := func(s *sst) (reader, error) {
+			return e.fileTable.getOrOpen(s.path)
 		}
-
-		handle, err := e.fileTable.getOrOpen(s.path)
-		if err != nil {
-			continue
-		}
-		sources = append(sources, s.Iterator(lo, hi, handle))
+		sources = append(sources, newSSTConcatIterator(l1ssts, lo, hi, opener))
 	}
 
+	if len(sources) == 1 {
+		// If there is only one source, return it. This is much faster than merging
+		return sources[0]
+	}
+
+	// Merge all the sources
 	return newMergeIterator(sources)
 }
 
@@ -344,12 +492,6 @@ func (e *Engine) Flush() error {
 	return nil
 }
 
-type emptyIterator struct{}
-
-func (it *emptyIterator) Next() bool    { return false }
-func (it *emptyIterator) Key() Key      { return nil }
-func (it *emptyIterator) Value() []byte { return nil }
-
 func (e *Engine) Compact() error {
 	e.flushMutex.Lock()
 
@@ -363,7 +505,7 @@ func (e *Engine) Compact() error {
 	entries := e.scan(
 		nil,
 		nil,
-		&emptyIterator{},
+		nil,
 		l0ssts,
 		l1ssts,
 	)
@@ -442,7 +584,7 @@ func (tx *Transaction) Get(key Key) ([]byte, error) {
 			return tx.entries[idx].value, nil
 		}
 	}
-	return tx.engine.Get(key)
+	return tx.engine.getLocked(key)
 }
 
 func (tx *Transaction) Apply() error {

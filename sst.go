@@ -462,6 +462,103 @@ func (s *sst) Get(key Key, reader reader) ([]byte, error) {
 	return nil, ErrNotFound
 }
 
+// BulkGet looks up multiple keys in this SST in a single pass.
+//
+// `sortedKeys` must be sorted in ascending order.
+// Returns parallel slices: values[i] and errs[i] correspond to sortedKeys[i].
+//   - errs[i] == nil:           found a value, values[i] is the data
+//   - errs[i] == ErrDeleted:    found a tombstone, values[i] is nil
+//   - errs[i] == ErrNotFound:   key is not in this SST, values[i] is nil
+//
+// The optimization: keys are bucketed per block. Each block is read at most once,
+// and a single forward scan through the block finds all requested keys in that block.
+func (s *sst) BulkGet(sortedKeys []Key, reader reader) ([][]byte, []error, error) {
+	values := make([][]byte, len(sortedKeys))
+	errs := make([]error, len(sortedKeys))
+	for i := range errs {
+		errs[i] = ErrNotFound
+	}
+
+	// Walk keys and group them by block. Both keys and blocks are sorted.
+	keyIndex := 0
+	blockStart := 0 // narrows the bsearch range as we go
+
+	for keyIndex < len(sortedKeys) {
+		key := sortedKeys[keyIndex]
+
+		// Find the block for this key, narrowing search to [blockStart:]
+		searchBlocks := s.blocks[blockStart:]
+		offset := bsearchBlock(searchBlocks, key) - 1
+		blockIndex := blockStart + offset
+
+		if blockIndex < 0 {
+			// Key is before the first block — not in this SST
+			keyIndex++
+			continue
+		}
+
+		// Determine the range of keys that fall within this block.
+		var nextFirstKey Key
+		if blockIndex+1 < len(s.blocks) {
+			nextFirstKey = s.blocks[blockIndex+1].FirstKey
+		}
+
+		batchEnd := keyIndex + 1
+		for batchEnd < len(sortedKeys) {
+			if nextFirstKey != nil && bytes.Compare(sortedKeys[batchEnd], nextFirstKey) >= 0 {
+				break
+			}
+			batchEnd++
+		}
+
+		// Load the block once and scan it for all keys in [keyIndex, batchEnd)
+		block, err := s.GetBlock(uint64(blockIndex), reader)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		// Single forward scan through the block, picking up all keys in [keyIndex, batchEnd)
+		data := block.data
+		pos := int64(0)
+		endPos := int64(len(data)) - blockFooterSize
+		wantedIdx := keyIndex
+
+		for pos < endPos && wantedIdx < batchEnd {
+			entryKey, valueLen, entrySize, err := readEntry(data, pos)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			// Advance through wanted keys smaller than the current entry
+			for wantedIdx < batchEnd && bytes.Compare(sortedKeys[wantedIdx], entryKey) < 0 {
+				wantedIdx++
+			}
+
+			if wantedIdx >= batchEnd {
+				break
+			}
+
+			if bytes.Equal(sortedKeys[wantedIdx], entryKey) {
+				if valueLen == tombstone {
+					errs[wantedIdx] = ErrDeleted
+				} else {
+					valueStart := pos + entrySize - int64(valueLen)
+					values[wantedIdx] = data[valueStart : valueStart+int64(valueLen)]
+					errs[wantedIdx] = nil
+				}
+				wantedIdx++
+			}
+
+			pos += entrySize
+		}
+
+		keyIndex = batchEnd
+		blockStart = blockIndex
+	}
+
+	return values, errs, nil
+}
+
 type sstIterator struct {
 	sst        *sst
 	reader     reader
@@ -479,9 +576,7 @@ type sstIterator struct {
 func (s *sst) Iterator(lo Key, hi Key, r reader) *sstIterator {
 	blockIndex := bsearchBlock(s.blocks, lo) - 1
 
-	if blockIndex < 0 {
-		blockIndex = 0
-	}
+	blockIndex = max(blockIndex, 0)
 
 	return &sstIterator{
 		sst:        s,
@@ -555,6 +650,91 @@ func (it *sstIterator) Key() Key {
 
 func (it *sstIterator) Value() []byte {
 	return it.value
+}
+
+// sstConcatIterator iterates over a sorted list of non-overlapping SSTs as a
+// single logical sorted source. Used for L1 SSTs where SSTs partition the key
+// space and don't overlap, so they can be walked sequentially without merging.
+type sstConcatIterator struct {
+	ssts     []*sst
+	openSST  func(*sst) (reader, error)
+	lo       Key
+	hi       Key
+	sstIndex int
+	current  *sstIterator
+	done     bool
+}
+
+// newSSTConcatIterator creates an iterator over the given sorted, non-overlapping SSTs.
+// `openSST` is a callback that returns a reader for the given SST.
+func newSSTConcatIterator(ssts []*sst, lo Key, hi Key, openSST func(*sst) (reader, error)) *sstConcatIterator {
+	// Find the first SST that could contain `lo`
+	startIndex := 0
+	if lo != nil {
+		startIndex = bsearchBlock(toBlockIndices(ssts), lo) - 1
+		startIndex = max(startIndex, 0)
+	}
+
+	it := &sstConcatIterator{
+		ssts:     ssts,
+		openSST:  openSST,
+		lo:       lo,
+		hi:       hi,
+		sstIndex: startIndex,
+	}
+	it.done = startIndex >= len(ssts)
+	return it
+}
+
+// toBlockIndices converts the SST list into a synthetic block index list so we
+// can reuse bsearchBlock for the SST-level binary search.
+func toBlockIndices(ssts []*sst) []sstBlockIndex {
+	out := make([]sstBlockIndex, len(ssts))
+	for i, s := range ssts {
+		out[i] = sstBlockIndex{FirstKey: s.firstKey}
+	}
+	return out
+}
+
+func (it *sstConcatIterator) Next() bool {
+	for !it.done {
+		// Open the current SST iterator if needed
+		if it.current == nil {
+			if it.sstIndex >= len(it.ssts) {
+				it.done = true
+				return false
+			}
+			s := it.ssts[it.sstIndex]
+			// Skip SSTs entirely past the upper bound
+			if it.hi != nil && bytes.Compare(s.firstKey, it.hi) >= 0 {
+				it.done = true
+				return false
+			}
+			r, err := it.openSST(s)
+			if err != nil {
+				it.done = true
+				return false
+			}
+			it.current = s.Iterator(it.lo, it.hi, r)
+		}
+
+		if it.current.Next() {
+			return true
+		}
+
+		// Current SST exhausted; move to next
+		it.current = nil
+		it.sstIndex++
+	}
+	return false
+}
+
+func (it *sstConcatIterator) Key() Key {
+	return it.current.key
+}
+
+func (it *sstConcatIterator) Value() []byte {
+	return it.current.value
 }
 
 // bsearchBlock returns the index of the first block whose FirstKey > key.

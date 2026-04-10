@@ -87,6 +87,75 @@ func TestEngineGetMissing(t *testing.T) {
 	}
 }
 
+func TestEngineBulkGet(t *testing.T) {
+	engine := openTestEngine(t)
+
+	// Insert some keys, flush, insert more, leave in memtable
+	for idx := uint64(0); idx < 10; idx++ {
+		engine.Put(key(idx), []byte(fmt.Sprintf("value-%d", idx)))
+	}
+	engine.Flush()
+	for idx := uint64(10); idx < 20; idx++ {
+		engine.Put(key(idx), []byte(fmt.Sprintf("value-%d", idx)))
+	}
+
+	// Request a mix of keys: some in L0, some in memtable, some missing
+	requested := []Key{key(2), key(15), key(99), key(7), key(17)}
+	result, err := engine.BulkGet(requested)
+	if err != nil {
+		t.Fatalf("BulkGet: %v", err)
+	}
+
+	if len(result) != len(requested) {
+		t.Fatalf("got %d results, want %d", len(result), len(requested))
+	}
+
+	expected := []string{"value-2", "value-15", "", "value-7", "value-17"}
+	for idx, want := range expected {
+		got := string(result[idx])
+		if got != want {
+			t.Errorf("BulkGet[%d]: got %q, want %q", idx, got, want)
+		}
+	}
+}
+
+func TestEngineBulkGetEmpty(t *testing.T) {
+	engine := openTestEngine(t)
+	result, err := engine.BulkGet(nil)
+	if err != nil {
+		t.Fatalf("BulkGet(nil): %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("BulkGet(nil): got %d entries, want 0", len(result))
+	}
+}
+
+func TestEngineBulkGetAfterCompact(t *testing.T) {
+	engine := openTestEngine(t)
+	for idx := uint64(0); idx < 100; idx++ {
+		engine.Put(key(idx), []byte(fmt.Sprintf("v-%d", idx)))
+	}
+	engine.Flush()
+	engine.Compact()
+
+	requested := []Key{key(0), key(50), key(99)}
+	result, err := engine.BulkGet(requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result) != 3 {
+		t.Errorf("got %d, want 3", len(result))
+	}
+	for idx, k := range []uint64{0, 50, 99} {
+		want := fmt.Sprintf("v-%d", k)
+		got := string(result[idx])
+		if got != want {
+			t.Errorf("BulkGet[%d] (key %d): got %q, want %q", idx, k, got, want)
+		}
+	}
+}
+
 func TestEnginePutOverwrite(t *testing.T) {
 	engine := openTestEngine(t)
 	engine.Put(key(1), []byte("first"))
@@ -3979,6 +4048,9 @@ func TestPartitionedMultipleFlushesAndCompact(t *testing.T) {
 // =============================================================================
 
 func TestMetamorphic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow metamorphic test in -short mode")
+	}
 	seed := int64(42)
 	rng := rand.New(rand.NewSource(seed))
 	engine := openTestEngine(t)
@@ -4088,6 +4160,9 @@ func TestMetamorphic(t *testing.T) {
 }
 
 func TestMetamorphicWithPartitioning(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow metamorphic test in -short mode")
+	}
 	withSmallSSTSize(t, 512, 128)
 	seed := int64(99)
 	rng := rand.New(rand.NewSource(seed))

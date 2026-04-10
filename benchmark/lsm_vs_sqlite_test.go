@@ -12,9 +12,27 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/dgraph-io/badger/v4"
 	_ "github.com/mattn/go-sqlite3"
+	bolt "go.etcd.io/bbolt"
 
 	"github.com/germtb/protodb"
 )
+
+var boltBucket = []byte("kv")
+
+func initBolt(b *testing.B) *bolt.DB {
+	b.Helper()
+	db, err := bolt.Open(filepath.Join(b.TempDir(), "bolt.db"), 0600, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(boltBucket)
+		return err
+	}); err != nil {
+		b.Fatal(err)
+	}
+	return db
+}
 
 // initKVSQLite opens a SQLite DB with a minimal KV schema matching the LSM's
 // key-value model: (key INTEGER PRIMARY KEY, value BLOB).
@@ -171,6 +189,7 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 				}
 			}
 		})
+
 	}
 
 	// --- Get: single key lookup after populating + flushing ---
@@ -253,6 +272,26 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 			}
 			item.ValueCopy(nil)
 			txn.Discard()
+		}
+	})
+
+	b.Run("Get/Bolt", func(b *testing.B) {
+		db := initBolt(b)
+		defer db.Close()
+		db.Update(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket(boltBucket)
+			for idx := 0; idx < populateSize; idx++ {
+				bucket.Put(uint64Key(uint64(idx)), val)
+			}
+			return nil
+		})
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			db.View(func(tx *bolt.Tx) error {
+				bucket := tx.Bucket(boltBucket)
+				_ = bucket.Get(poolKey(iter % populateSize))
+				return nil
+			})
 		}
 	})
 
@@ -369,6 +408,36 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 			if count != 1000 {
 				b.Fatalf("expected 1000 entries, got %d", count)
 			}
+		}
+	})
+
+	b.Run("Scan1000/Bolt", func(b *testing.B) {
+		db := initBolt(b)
+		defer db.Close()
+		db.Update(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket(boltBucket)
+			for idx := 0; idx < populateSize; idx++ {
+				bucket.Put(uint64Key(uint64(idx)), val)
+			}
+			return nil
+		})
+		hi := uint64Key(1000)
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			db.View(func(tx *bolt.Tx) error {
+				cursor := tx.Bucket(boltBucket).Cursor()
+				count := 0
+				for k, _ := cursor.First(); k != nil; k, _ = cursor.Next() {
+					if bytes.Compare(k, hi) >= 0 {
+						break
+					}
+					count++
+				}
+				if count != 1000 {
+					b.Fatalf("expected 1000 entries, got %d", count)
+				}
+				return nil
+			})
 		}
 	})
 }
