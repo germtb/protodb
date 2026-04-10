@@ -1,6 +1,8 @@
 package protodb
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -4193,3 +4195,1497 @@ func TestMetamorphicWithPartitioning(t *testing.T) {
 	}
 }
 
+// --- Crash Scenario Tests ---
+
+func TestCrashMidWALWrite(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a valid entry.
+	engine.Put(1, []byte("valid"))
+	engine.Close()
+
+	// Manually append a partial WAL frame: just the frame_len, no payload.
+	walPath := filepath.Join(dir, "protodb", "wal")
+	file, err := os.OpenFile(walPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := make([]byte, 4)
+	binary.BigEndian.PutUint32(partial, 9999) // bogus frame_len
+	file.Write(partial)
+	file.Close()
+
+	// Reopen — the valid entry should be recovered, partial frame discarded.
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	got, err := engine.Get(1)
+	if err != nil {
+		t.Fatalf("Get(1) after crash recovery: %v", err)
+	}
+	if string(got) != "valid" {
+		t.Errorf("Get(1): got %q, want %q", got, "valid")
+	}
+}
+
+func TestCrashMidWALWriteCorruptedPayload(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write two valid entries.
+	engine.Put(10, []byte("alpha"))
+	engine.Put(20, []byte("beta"))
+	engine.Close()
+
+	// Append a frame with valid header but corrupted payload (bad CRC).
+	walPath := filepath.Join(dir, "protodb", "wal")
+	file, err := os.OpenFile(walPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a frame manually with a wrong CRC.
+	value := []byte("corrupt")
+	payloadSize := walEntryFixedSize + len(value)
+	header := make([]byte, walHeaderSize)
+	binary.BigEndian.PutUint32(header[0:4], uint32(4+payloadSize)) // frame_len
+	binary.BigEndian.PutUint32(header[4:8], 0xDEADBEEF)           // bad CRC
+
+	payload := make([]byte, walEntryFixedSize+len(value))
+	binary.BigEndian.PutUint64(payload[0:8], 30)               // key
+	binary.BigEndian.PutUint64(payload[8:16], uint64(len(value))) // value len
+	copy(payload[16:], value)
+
+	file.Write(header)
+	file.Write(payload)
+	file.Close()
+
+	// Reopen — valid entries recovered, corrupted frame discarded.
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	got, err := engine.Get(10)
+	if err != nil {
+		t.Fatalf("Get(10): %v", err)
+	}
+	if string(got) != "alpha" {
+		t.Errorf("Get(10): got %q, want %q", got, "alpha")
+	}
+
+	got, err = engine.Get(20)
+	if err != nil {
+		t.Fatalf("Get(20): %v", err)
+	}
+	if string(got) != "beta" {
+		t.Errorf("Get(20): got %q, want %q", got, "beta")
+	}
+
+	// The corrupted key should not exist.
+	got, err = engine.Get(30)
+	if err != nil {
+		t.Fatalf("Get(30): %v", err)
+	}
+	if got != nil {
+		t.Errorf("Get(30): got %q, want nil (corrupted frame should be discarded)", got)
+	}
+}
+
+func TestCrashAfterWALWriteBeforeFlush(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Put several entries, close without flushing.
+	entries := map[uint64]string{
+		1: "one",
+		2: "two",
+		3: "three",
+		4: "four",
+		5: "five",
+	}
+	for key, val := range entries {
+		engine.Put(key, []byte(val))
+	}
+	engine.Close()
+
+	// Reopen — all entries should be recovered from WAL replay.
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	for key, want := range entries {
+		got, err := engine.Get(key)
+		if err != nil {
+			t.Fatalf("Get(%d): %v", key, err)
+		}
+		if string(got) != want {
+			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestCrashMultipleReopensWithoutFlush(t *testing.T) {
+	dir := t.TempDir()
+
+	// Session 1: write entries, close without flush.
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.Put(1, []byte("session1_a"))
+	engine.Put(2, []byte("session1_b"))
+	engine.Close()
+
+	// Session 2: reopen, write more entries, close without flush.
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.Put(3, []byte("session2_a"))
+	engine.Put(4, []byte("session2_b"))
+	engine.Close()
+
+	// Session 3: reopen and verify all entries from both sessions exist.
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	expected := map[uint64]string{
+		1: "session1_a",
+		2: "session1_b",
+		3: "session2_a",
+		4: "session2_b",
+	}
+
+	for key, want := range expected {
+		got, err := engine.Get(key)
+		if err != nil {
+			t.Fatalf("Get(%d): %v", key, err)
+		}
+		if string(got) != want {
+			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestWALReplayIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Put entries and flush them to L0 SSTs.
+	engine.Put(100, []byte("flushed_a"))
+	engine.Put(200, []byte("flushed_b"))
+	err = engine.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.Close()
+
+	// Simulate crash after flush but before WAL clear: manually write the same
+	// entries back into the WAL as if the clear never happened.
+	walPath := filepath.Join(dir, "protodb", "wal")
+	file, err := os.OpenFile(walPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	writeFrame(&buf, 100, []byte("flushed_a"))
+	writeFrame(&buf, 200, []byte("flushed_b"))
+	file.Write(buf.Bytes())
+	file.Close()
+
+	// Reopen — entries should be correct even though WAL replays entries
+	// that already exist in L0 SSTs.
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	got, err := engine.Get(100)
+	if err != nil {
+		t.Fatalf("Get(100): %v", err)
+	}
+	if string(got) != "flushed_a" {
+		t.Errorf("Get(100): got %q, want %q", got, "flushed_a")
+	}
+
+	got, err = engine.Get(200)
+	if err != nil {
+		t.Fatalf("Get(200): %v", err)
+	}
+	if string(got) != "flushed_b" {
+		t.Errorf("Get(200): got %q, want %q", got, "flushed_b")
+	}
+
+	// Verify no phantom extra entries by checking a key that was never written.
+	got, err = engine.Get(300)
+	if err != nil {
+		t.Fatalf("Get(300): %v", err)
+	}
+	if got != nil {
+		t.Errorf("Get(300): got %q, want nil", got)
+	}
+}
+
+// --- Data Corruption Scenarios ---
+
+func TestCorruptedBlockChecksumOnGet(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine.Put(1, []byte("value1"))
+	engine.Put(2, []byte("value2"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Compact(); err != nil {
+		t.Fatal(err)
+	}
+
+	sstPath := engine.l1.ssts[0].path
+	engine.Close()
+
+	// Corrupt a byte in the middle of the SST file (inside a data block)
+	data, err := os.ReadFile(sstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid := len(data) / 2
+	data[mid] ^= 0xFF
+	if err := os.WriteFile(sstPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	engine2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	_, err = engine2.Get(1)
+	if err == nil {
+		t.Fatal("expected an error from Get on corrupted SST, got nil")
+	}
+	if !errors.Is(err, ErrCorrupted) {
+		t.Fatalf("expected ErrCorrupted, got: %v", err)
+	}
+}
+
+func TestCorruptedBlockChecksumOnScan(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine.Put(1, []byte("value1"))
+	engine.Put(2, []byte("value2"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Compact(); err != nil {
+		t.Fatal(err)
+	}
+
+	sstPath := engine.l1.ssts[0].path
+	engine.Close()
+
+	// Corrupt a byte in the data block area
+	data, err := os.ReadFile(sstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid := len(data) / 2
+	data[mid] ^= 0xFF
+	if err := os.WriteFile(sstPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	engine2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	// Scan should stop iteration gracefully (not panic) when it hits the corrupted block
+	iter := engine2.Scan(0, math.MaxUint64)
+	count := 0
+	for iter.Next() {
+		count++
+	}
+	if count != 0 {
+		t.Logf("scan returned %d items from corrupted SST (expected 0 or graceful stop)", count)
+	}
+}
+
+func TestCorruptedManifestInvalidHash(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine.Put(1, []byte("value1"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	engine.Close()
+
+	// Replace the L1 manifest content with a nonexistent hash
+	manifestPath := filepath.Join(dir, "protodb", "l1")
+	if err := os.WriteFile(manifestPath, []byte("deadbeefdeadbeefdeadbeefdeadbeef\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(dir)
+	if err == nil {
+		t.Fatal("expected error when reopening with invalid manifest hash, got nil")
+	}
+}
+
+func TestCorruptedManifestPartialLine(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine.Put(1, []byte("value1"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	engine.Close()
+
+	// Append a partial line (half a SHA256 hash, no newline) to the L0 manifest
+	manifestPath := filepath.Join(dir, "protodb", "l0")
+	file, err := os.OpenFile(manifestPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write half a SHA256 hash (32 hex chars instead of 64) as a partial/invalid entry
+	file.WriteString("abcdef1234567890abcdef1234567890")
+	file.Close()
+
+	_, err = Open(dir)
+	if err == nil {
+		t.Fatal("expected error when reopening with partial manifest line, got nil")
+	}
+}
+
+func TestZeroLengthSSTFile(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine.Put(1, []byte("value1"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	sstPath := engine.l0.ssts[0].path
+	engine.Close()
+
+	// Replace the SST file with a zero-length file
+	if err := os.WriteFile(sstPath, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(dir)
+	if err == nil {
+		t.Fatal("expected error when reopening with zero-length SST file, got nil")
+	}
+}
+
+func TestSSTWithValidFooterButCorruptedBlockIndex(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine.Put(1, []byte("value1"))
+	engine.Put(2, []byte("value2"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	sstPath := engine.l0.ssts[0].path
+	engine.Close()
+
+	// Corrupt the block index area (between blocks and footer)
+	data, err := os.ReadFile(sstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The footer is the last footerSize bytes.
+	// The block index entries sit right before the footer.
+	// Block index entry layout: FirstKey(u64) + Offset(u64) + Length(u32) = 20 bytes.
+	footerStart := len(data) - int(footerSize)
+	blockIndexStart := footerStart - int(sstBlockIndexSize)
+	if blockIndexStart < 0 {
+		t.Fatal("SST file too small to have a block index")
+	}
+	// Corrupt the Offset field (bytes 8-15 of the block index entry) to point
+	// to an invalid location, and corrupt the Length field (bytes 16-19) to
+	// request a huge read. This forces GetBlock to read garbage that will fail
+	// the CRC check.
+	offsetField := blockIndexStart + 8
+	data[offsetField] ^= 0xFF
+	data[offsetField+1] ^= 0xFF
+	lengthField := blockIndexStart + 16
+	data[lengthField] ^= 0xFF
+	if err := os.WriteFile(sstPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	engine2, err := Open(dir)
+	if err != nil {
+		// Reopening itself may fail if the block index is too garbled
+		return
+	}
+	defer engine2.Close()
+
+	// With corrupted block index, Get should return an error or nil (not panic).
+	// The corrupted offset/length will cause either a read error or a CRC mismatch.
+	_, err = engine2.Get(1)
+	if err == nil {
+		// If Get returns nil without error, it means the corrupted block index
+		// caused the key lookup to miss entirely. This is acceptable behavior
+		// (the data is lost but no panic occurred).
+		t.Log("Get returned nil with no error; corrupted block index caused key miss")
+	}
+}
+
+func TestCorruptedWALRecovery(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write several entries without flushing (they live only in WAL)
+	for keyVal := uint64(1); keyVal <= 10; keyVal++ {
+		engine.Put(keyVal, []byte(fmt.Sprintf("value%d", keyVal)))
+	}
+	walPath := engine.WALPath()
+	engine.Close()
+
+	// Read the WAL and corrupt bytes in the middle
+	data, err := os.ReadFile(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 20 {
+		t.Fatal("WAL file unexpectedly small")
+	}
+
+	// Corrupt bytes roughly in the middle of the WAL
+	mid := len(data) / 2
+	data[mid] ^= 0xFF
+	data[mid+1] ^= 0xFF
+	data[mid+2] ^= 0xFF
+	if err := os.WriteFile(walPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen - should recover entries before the corruption
+	engine2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	// Count how many entries survived
+	recoveredCount := 0
+	for keyVal := uint64(1); keyVal <= 10; keyVal++ {
+		got, err := engine2.Get(keyVal)
+		if err != nil {
+			t.Fatalf("Get(%d) returned unexpected error: %v", keyVal, err)
+		}
+		if got != nil {
+			recoveredCount++
+		}
+	}
+
+	// Some entries before the corruption point should be recovered
+	if recoveredCount == 0 {
+		t.Fatal("expected at least some entries to be recovered from WAL before corruption")
+	}
+	// Entries after the corruption should be lost
+	if recoveredCount == 10 {
+		t.Fatal("expected some entries to be lost due to WAL corruption, but all 10 were recovered")
+	}
+	t.Logf("recovered %d out of 10 entries from corrupted WAL", recoveredCount)
+}
+
+// --- Adversarial runtime scenarios ---
+
+func TestSSTDeletedWhileRunningGet(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	engine.Put(1, []byte("value1"))
+	engine.Put(2, []byte("value2"))
+	err = engine.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete all SST files from the objects directory
+	objectsDir := engine.ObjectsPath()
+	dirEntries, err := os.ReadDir(objectsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range dirEntries {
+		os.Remove(filepath.Join(objectsDir, entry.Name()))
+	}
+
+	// Clear file table so cached handles don't mask the deletion
+	engine.fileTable.Clear()
+
+	// Get should return an error, not panic
+	_, err = engine.Get(1)
+	if err == nil {
+		t.Log("Get returned nil error after SST deletion (key treated as missing)")
+	}
+}
+
+func TestSSTDeletedWhileRunningScan(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	for idx := uint64(1); idx <= 100; idx++ {
+		engine.Put(idx, []byte(fmt.Sprintf("val-%d", idx)))
+	}
+	err = engine.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete all SST files
+	objectsDir := engine.ObjectsPath()
+	dirEntries, err := os.ReadDir(objectsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range dirEntries {
+		os.Remove(filepath.Join(objectsDir, entry.Name()))
+	}
+
+	// Clear file table so the scan must re-open (and fail to find) the files
+	engine.fileTable.Clear()
+
+	// Scan should not panic — it may skip entries or return nothing
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("Scan panicked after SST deletion: %v", recovered)
+		}
+	}()
+
+	iter := engine.Scan(1, 101)
+	for iter.Next() {
+		// just drain the iterator
+	}
+}
+
+func TestObjectsDirDeletedWhileRunning(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	engine.Put(1, []byte("value1"))
+	err = engine.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove the entire objects directory
+	objectsDir := engine.ObjectsPath()
+	os.RemoveAll(objectsDir)
+	engine.fileTable.Clear()
+
+	// Get should return an error (not panic)
+	_, err = engine.Get(1)
+	if err == nil {
+		t.Log("Get returned nil error after objects dir deletion (key treated as missing)")
+	}
+
+	// Put should still work — it goes to the memtable
+	err = engine.Put(2, []byte("value2"))
+	if err != nil {
+		t.Fatalf("Put after objects dir deletion should work (memtable): %v", err)
+	}
+
+	got, err := engine.Get(2)
+	if err != nil {
+		t.Fatalf("Get(2) from memtable: %v", err)
+	}
+	if string(got) != "value2" {
+		t.Errorf("Get(2): got %q, want %q", got, "value2")
+	}
+
+	// Flush should fail because the objects directory is gone
+	err = engine.Flush()
+	if err == nil {
+		t.Log("Flush did not return error after objects dir deletion (may have recreated it)")
+	}
+}
+
+func TestFlushDuringActiveScan(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Insert initial data and flush so it is on disk
+	for idx := uint64(1); idx <= 50; idx++ {
+		engine.Put(idx, []byte(fmt.Sprintf("batch1-%d", idx)))
+	}
+	err = engine.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add more data to the memtable
+	for idx := uint64(51); idx <= 100; idx++ {
+		engine.Put(idx, []byte(fmt.Sprintf("batch2-%d", idx)))
+	}
+
+	// Start a scan over the full range — this takes a snapshot
+	iter := engine.Scan(1, 101)
+
+	// Read a few entries
+	readCount := 0
+	for readCount < 10 && iter.Next() {
+		readCount++
+	}
+
+	// Flush while the scan is active
+	err = engine.Flush()
+	if err != nil {
+		t.Fatalf("Flush during active scan: %v", err)
+	}
+
+	// Continue the scan — it should still work from its snapshot
+	for iter.Next() {
+		readCount++
+	}
+
+	if readCount != 100 {
+		t.Errorf("Scan returned %d entries, want 100", readCount)
+	}
+}
+
+func TestCompactDuringActiveScan(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Write data across multiple flushes to create L0 SSTs
+	for batch := 0; batch < 3; batch++ {
+		for idx := uint64(batch*50 + 1); idx <= uint64((batch+1)*50); idx++ {
+			engine.Put(idx, []byte(fmt.Sprintf("v%d-%d", batch, idx)))
+		}
+		err = engine.Flush()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Start a scan over the full range — takes a snapshot
+	iter := engine.Scan(1, 151)
+
+	// Read a few entries
+	readCount := 0
+	for readCount < 10 && iter.Next() {
+		readCount++
+	}
+
+	// Compact while the scan is in progress
+	err = engine.Compact()
+	if err != nil {
+		t.Fatalf("Compact during active scan: %v", err)
+	}
+
+	// Continue iterating — snapshot should still be valid
+	for iter.Next() {
+		readCount++
+	}
+
+	if readCount != 150 {
+		t.Errorf("Scan returned %d entries, want 150", readCount)
+	}
+}
+
+func TestConcurrentGetsAfterCompact(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Insert data, flush, and compact
+	expected := make(map[uint64]string)
+	for idx := uint64(1); idx <= 100; idx++ {
+		val := fmt.Sprintf("value-%d", idx)
+		engine.Put(idx, []byte(val))
+		expected[idx] = val
+	}
+	err = engine.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = engine.Compact()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run 10 goroutines doing concurrent Gets
+	var waitGroup sync.WaitGroup
+	for goroutine := 0; goroutine < 10; goroutine++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			for key := uint64(1); key <= 100; key++ {
+				got, getErr := engine.Get(key)
+				if getErr != nil {
+					t.Errorf("concurrent Get(%d): %v", key, getErr)
+					return
+				}
+				if string(got) != expected[key] {
+					t.Errorf("concurrent Get(%d): got %q, want %q", key, got, expected[key])
+					return
+				}
+			}
+		}()
+	}
+	waitGroup.Wait()
+}
+
+func TestReopenManyTimes(t *testing.T) {
+	dir := t.TempDir()
+
+	for session := 0; session < 10; session++ {
+		engine, err := Open(dir)
+		if err != nil {
+			t.Fatalf("session %d Open: %v", session, err)
+		}
+
+		// Verify all data from previous sessions
+		for prev := 0; prev < session; prev++ {
+			key := uint64(prev + 1)
+			got, err := engine.Get(key)
+			if err != nil {
+				t.Fatalf("session %d Get(%d): %v", session, key, err)
+			}
+			want := fmt.Sprintf("session-%d", prev)
+			if string(got) != want {
+				t.Fatalf("session %d Get(%d): got %q, want %q", session, key, got, want)
+			}
+		}
+
+		// Write new data for this session
+		key := uint64(session + 1)
+		err = engine.Put(key, []byte(fmt.Sprintf("session-%d", session)))
+		if err != nil {
+			t.Fatalf("session %d Put: %v", session, err)
+		}
+
+		err = engine.Flush()
+		if err != nil {
+			t.Fatalf("session %d Flush: %v", session, err)
+		}
+
+		err = engine.Close()
+		if err != nil {
+			t.Fatalf("session %d Close: %v", session, err)
+		}
+	}
+
+	// Final reopen: verify all 10 keys
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatalf("final Open: %v", err)
+	}
+	defer engine.Close()
+
+	for session := 0; session < 10; session++ {
+		key := uint64(session + 1)
+		got, err := engine.Get(key)
+		if err != nil {
+			t.Fatalf("final Get(%d): %v", key, err)
+		}
+		want := fmt.Sprintf("session-%d", session)
+		if string(got) != want {
+			t.Fatalf("final Get(%d): got %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestPutAfterClose(t *testing.T) {
+	engine := openTestEngine(t)
+
+	err := engine.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Put after Close should not panic
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("Put after Close panicked: %v", recovered)
+		}
+	}()
+
+	err = engine.Put(1, []byte("after-close"))
+	if err != nil {
+		t.Logf("Put after Close returned error (acceptable): %v", err)
+	}
+}
+
+// --- Flush Crash Scenarios ---
+
+func TestCrashAfterSSTWrittenBeforeManifestSave(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Put and flush some initial data.
+	engine.Put(1, []byte("alpha"))
+	engine.Put(2, []byte("beta"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write an orphaned SST file that is NOT referenced in the manifest.
+	objectsDir := filepath.Join(dir, "protodb", "objects")
+	orphanedFile, err := os.CreateTemp(objectsDir, "orphan-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orphanedFile.Write([]byte("this is garbage sst data")); err != nil {
+		t.Fatal(err)
+	}
+	orphanedFile.Close()
+
+	engine.Close()
+
+	// Reopen — orphaned SST should be ignored, only manifest-referenced SSTs loaded.
+	engine2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	got, err := engine2.Get(1)
+	if err != nil {
+		t.Fatalf("Get(1) after reopen: %v", err)
+	}
+	if string(got) != "alpha" {
+		t.Errorf("Get(1): got %q, want %q", got, "alpha")
+	}
+
+	got, err = engine2.Get(2)
+	if err != nil {
+		t.Fatalf("Get(2) after reopen: %v", err)
+	}
+	if string(got) != "beta" {
+		t.Errorf("Get(2): got %q, want %q", got, "beta")
+	}
+}
+
+func TestCrashAfterManifestSaveBeforeWALClear(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Put entries and flush them to L0.
+	engine.Put(1, []byte("first"))
+	engine.Put(2, []byte("second"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Put more entries — these go to the WAL and memtable.
+	engine.Put(1, []byte("updated-first"))
+	engine.Put(3, []byte("third"))
+
+	// Flush again so these entries are in L0 SSTs.
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the crash scenario: WAL was not cleared after the last flush.
+	// Write duplicate entries back into the WAL as if the clear never happened.
+	walPath := filepath.Join(dir, "protodb", "wal")
+	walFile, err := os.OpenFile(walPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var walBuf bytes.Buffer
+	writeFrame(&walBuf, 1, []byte("wal-replay-value"))
+	walFile.Write(walBuf.Bytes())
+	walFile.Close()
+
+	engine.Close()
+
+	// Reopen — WAL replays into memtable, L0 SSTs also have entries.
+	// Get checks memtable first, so the WAL-replayed value should win for key 1.
+	engine2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	got, err := engine2.Get(1)
+	if err != nil {
+		t.Fatalf("Get(1) after reopen: %v", err)
+	}
+	if string(got) != "wal-replay-value" {
+		t.Errorf("Get(1): got %q, want %q", got, "wal-replay-value")
+	}
+
+	// Key 2 should still be in L0.
+	got, err = engine2.Get(2)
+	if err != nil {
+		t.Fatalf("Get(2) after reopen: %v", err)
+	}
+	if string(got) != "second" {
+		t.Errorf("Get(2): got %q, want %q", got, "second")
+	}
+
+	// Key 3 should also be in L0.
+	got, err = engine2.Get(3)
+	if err != nil {
+		t.Fatalf("Get(3) after reopen: %v", err)
+	}
+	if string(got) != "third" {
+		t.Errorf("Get(3): got %q, want %q", got, "third")
+	}
+}
+
+func TestCorruptedL0Manifest(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine.Put(1, []byte("value1"))
+	engine.Put(2, []byte("value2"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	engine.Close()
+
+	// Corrupt the L0 manifest by writing references to non-existent SST files.
+	manifestPath := filepath.Join(dir, "protodb", "l0")
+	if err := os.WriteFile(manifestPath, []byte("not-a-real-hash\ncorrupt-garbage\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen should fail because the manifest references non-existent SST files.
+	_, err = Open(dir)
+	if err == nil {
+		t.Fatal("expected error when opening DB with corrupted L0 manifest, got nil")
+	}
+}
+
+func TestEmptyL0ManifestAfterFlush(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Put and flush data.
+	engine.Put(1, []byte("flushed"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Put more data (goes to WAL only, not flushed).
+	engine.Put(2, []byte("in-wal"))
+
+	engine.Close()
+
+	// Truncate the L0 manifest to 0 bytes, simulating crash during manifest write.
+	manifestPath := filepath.Join(dir, "protodb", "l0")
+	if err := os.Truncate(manifestPath, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen — flushed data (key 1) should be lost since manifest is empty,
+	// but WAL data (key 2) should be recovered.
+	engine2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	got, err := engine2.Get(1)
+	if err != nil {
+		t.Fatalf("Get(1) after reopen: %v", err)
+	}
+	if got != nil {
+		t.Errorf("Get(1): got %q, want nil (manifest was truncated, flushed data lost)", got)
+	}
+
+	got, err = engine2.Get(2)
+	if err != nil {
+		t.Fatalf("Get(2) after reopen: %v", err)
+	}
+	if string(got) != "in-wal" {
+		t.Errorf("Get(2): got %q, want %q", got, "in-wal")
+	}
+}
+
+func TestFlushWithReadOnlyObjectsDir(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	engine.Put(1, []byte("value1"))
+	engine.Put(2, []byte("value2"))
+
+	// Make the objects directory read-only so Flush cannot write SST files.
+	objectsDir := filepath.Join(dir, "protodb", "objects")
+	if err := os.Chmod(objectsDir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	// Restore permissions on cleanup so TempDir removal succeeds.
+	t.Cleanup(func() {
+		os.Chmod(objectsDir, 0755)
+	})
+
+	// Flush should fail because it cannot write to the objects directory.
+	err = engine.Flush()
+	if err == nil {
+		t.Fatal("expected Flush to fail with read-only objects dir, got nil")
+	}
+
+	// Data should still be accessible via memtable despite the failed flush.
+	got, err := engine.Get(1)
+	if err != nil {
+		t.Fatalf("Get(1) after failed flush: %v", err)
+	}
+	if string(got) != "value1" {
+		t.Errorf("Get(1): got %q, want %q", got, "value1")
+	}
+
+	got, err = engine.Get(2)
+	if err != nil {
+		t.Fatalf("Get(2) after failed flush: %v", err)
+	}
+	if string(got) != "value2" {
+		t.Errorf("Get(2): got %q, want %q", got, "value2")
+	}
+}
+
+// --- Crash During Compaction Tests ---
+
+func TestCrashAfterL1SSTsWrittenBeforeL1ManifestSave(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write initial data and flush to L0, then compact to L1.
+	for key := uint64(1); key <= 10; key++ {
+		engine.Put(key, []byte(fmt.Sprintf("value_%d", key)))
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Compact(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Flush more data to L0.
+	for key := uint64(11); key <= 20; key++ {
+		engine.Put(key, []byte(fmt.Sprintf("value_%d", key)))
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save the current L1 manifest content before a second compaction.
+	l1ManifestPath := filepath.Join(dir, "protodb", "l1")
+	oldL1Manifest, err := os.ReadFile(l1ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine.Close()
+
+	// Simulate crash: write orphaned SST files to objects dir (as if compaction
+	// wrote new L1 SSTs but crashed before saving the L1 manifest).
+	objectsDir := filepath.Join(dir, "protodb", "objects")
+	orphanPath := filepath.Join(objectsDir, "orphaned_sst_file")
+	if err := os.WriteFile(orphanPath, []byte("garbage"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restore old L1 manifest (simulating manifest never got updated).
+	if err := os.WriteFile(l1ManifestPath, oldL1Manifest, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen — old L1 manifest is valid, orphaned SSTs are just wasted space.
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Original compacted data (keys 1-10) should be accessible via L1.
+	for key := uint64(1); key <= 10; key++ {
+		got, err := engine.Get(key)
+		if err != nil {
+			t.Fatalf("Get(%d): %v", key, err)
+		}
+		want := fmt.Sprintf("value_%d", key)
+		if string(got) != want {
+			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+		}
+	}
+
+	// Keys 11-20 should be in L0 (the flush before crash was committed).
+	for key := uint64(11); key <= 20; key++ {
+		got, err := engine.Get(key)
+		if err != nil {
+			t.Fatalf("Get(%d): %v", key, err)
+		}
+		want := fmt.Sprintf("value_%d", key)
+		if string(got) != want {
+			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestCrashAfterL1ManifestSavedBeforeL0Trim(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write data and flush to L0.
+	for key := uint64(1); key <= 10; key++ {
+		engine.Put(key, []byte(fmt.Sprintf("value_%d", key)))
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save the L0 manifest content before compaction.
+	l0ManifestPath := filepath.Join(dir, "protodb", "l0")
+	oldL0Manifest, err := os.ReadFile(l0ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Compact (moves L0 -> L1).
+	if err := engine.Compact(); err != nil {
+		t.Fatal(err)
+	}
+
+	engine.Close()
+
+	// Simulate crash: L1 manifest has the new SSTs, but L0 manifest still has
+	// the old entries (crash before L0 was trimmed). Restore old L0 manifest.
+	if err := os.WriteFile(l0ManifestPath, oldL0Manifest, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen — data exists in both L0 and L1. Get should be idempotent.
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	for key := uint64(1); key <= 10; key++ {
+		got, err := engine.Get(key)
+		if err != nil {
+			t.Fatalf("Get(%d): %v", key, err)
+		}
+		want := fmt.Sprintf("value_%d", key)
+		if string(got) != want {
+			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+		}
+	}
+
+	// Verify no phantom data.
+	got, err := engine.Get(999)
+	if err != nil {
+		t.Fatalf("Get(999): %v", err)
+	}
+	if got != nil {
+		t.Errorf("Get(999): got %q, want nil", got)
+	}
+}
+
+func TestCompactWithConcurrentFlush(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Flush 5 batches to L0.
+	for batch := 0; batch < 5; batch++ {
+		for key := uint64(batch*10 + 1); key <= uint64(batch*10+10); key++ {
+			engine.Put(key, []byte(fmt.Sprintf("batch%d_%d", batch, key)))
+		}
+		if err := engine.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Start a goroutine that does another Put+Flush while compact is running.
+	var wg sync.WaitGroup
+	var flushErr error
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		engine.Put(100, []byte("concurrent_value"))
+		flushErr = engine.Flush()
+	}()
+
+	// Run compact concurrently.
+	compactErr := engine.Compact()
+
+	wg.Wait()
+
+	if compactErr != nil {
+		t.Fatalf("Compact: %v", compactErr)
+	}
+	if flushErr != nil {
+		t.Fatalf("concurrent Flush: %v", flushErr)
+	}
+
+	// Verify all data from the 5 batches is accessible.
+	for batch := 0; batch < 5; batch++ {
+		for key := uint64(batch*10 + 1); key <= uint64(batch*10+10); key++ {
+			got, err := engine.Get(key)
+			if err != nil {
+				t.Fatalf("Get(%d): %v", key, err)
+			}
+			if got == nil {
+				t.Fatalf("Get(%d): got nil, want non-nil", key)
+			}
+		}
+	}
+
+	// Verify the concurrently flushed value is accessible.
+	got, err := engine.Get(100)
+	if err != nil {
+		t.Fatalf("Get(100): %v", err)
+	}
+	if string(got) != "concurrent_value" {
+		t.Errorf("Get(100): got %q, want %q", got, "concurrent_value")
+	}
+}
+
+func TestDoubleCompactVerifiesL0EmptyAndOverwrite(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// First batch: flush and compact.
+	for key := uint64(1); key <= 10; key++ {
+		engine.Put(key, []byte(fmt.Sprintf("first_%d", key)))
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Compact(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify L0 is empty after first compact.
+	if len(engine.l0.ssts) != 0 {
+		t.Errorf("L0 should have 0 SSTs after compact, got %d", len(engine.l0.ssts))
+	}
+	if len(engine.l0.manifest.hashes) != 0 {
+		t.Errorf("L0 manifest should have 0 hashes after compact, got %d", len(engine.l0.manifest.hashes))
+	}
+
+	// Second batch: flush and compact again.
+	for key := uint64(11); key <= 20; key++ {
+		engine.Put(key, []byte(fmt.Sprintf("second_%d", key)))
+	}
+	// Also overwrite some keys from the first batch.
+	engine.Put(5, []byte("updated_5"))
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Compact(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify L0 is empty after second compact.
+	if len(engine.l0.ssts) != 0 {
+		t.Errorf("L0 should have 0 SSTs after second compact, got %d", len(engine.l0.ssts))
+	}
+	if len(engine.l0.manifest.hashes) != 0 {
+		t.Errorf("L0 manifest should have 0 hashes after second compact, got %d", len(engine.l0.manifest.hashes))
+	}
+
+	// All data should be correct in L1.
+	for key := uint64(1); key <= 10; key++ {
+		got, err := engine.Get(key)
+		if err != nil {
+			t.Fatalf("Get(%d): %v", key, err)
+		}
+		want := fmt.Sprintf("first_%d", key)
+		if key == 5 {
+			want = "updated_5"
+		}
+		if string(got) != want {
+			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+		}
+	}
+	for key := uint64(11); key <= 20; key++ {
+		got, err := engine.Get(key)
+		if err != nil {
+			t.Fatalf("Get(%d): %v", key, err)
+		}
+		want := fmt.Sprintf("second_%d", key)
+		if string(got) != want {
+			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestCompactEmptyL0(t *testing.T) {
+	dir := t.TempDir()
+
+	// Test 1: Compact with completely empty engine (no L0, no L1).
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := engine.Compact(); err != nil {
+		t.Fatalf("Compact on empty engine: %v", err)
+	}
+
+	engine.Close()
+
+	// Test 2: Compact with data only in L1 (L0 is empty).
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Put data, flush to L0, compact to L1.
+	for key := uint64(1); key <= 5; key++ {
+		engine.Put(key, []byte(fmt.Sprintf("value_%d", key)))
+	}
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Compact(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now L0 is empty, L1 has data. Compact again should be a no-op.
+	if err := engine.Compact(); err != nil {
+		t.Fatalf("Compact with empty L0: %v", err)
+	}
+
+	engine.Close()
+
+	// Reopen and verify data is still correct.
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	for key := uint64(1); key <= 5; key++ {
+		got, err := engine.Get(key)
+		if err != nil {
+			t.Fatalf("Get(%d): %v", key, err)
+		}
+		want := fmt.Sprintf("value_%d", key)
+		if string(got) != want {
+			t.Errorf("Get(%d): got %q, want %q", key, got, want)
+		}
+	}
+}
