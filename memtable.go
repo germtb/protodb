@@ -18,7 +18,7 @@ type memtable struct {
 
 func newMemtable() memtable {
 	return memtable{
-		tree: btree.NewG[mementry](32, func(a, b mementry) bool {
+		tree: btree.NewG(32, func(a, b mementry) bool {
 			return bytes.Compare(a.key, b.key) < 0
 		}),
 		byteSize: 0,

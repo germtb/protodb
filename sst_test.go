@@ -90,8 +90,8 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if s.footer.Version != sstVersion {
-		t.Fatalf("version: got %d, want %d", s.footer.Version, sstVersion)
+	if s.footer.Version != Version {
+		t.Fatalf("version: got %d, want %d", s.footer.Version, Version)
 	}
 
 	f := openSSTFile(t, dir, s)
@@ -186,7 +186,7 @@ func TestCustomTailSize(t *testing.T) {
 	}
 
 	// TailByteSize just enough for footer — forces re-read for block index
-	s, err := ReadSST(dir, ssts[0].hash, &ReaderOptions{TailByteSize: footerSize})
+	s, err := ReadSST(dir, ssts[0].hash, &ReaderOptions{TailByteSize: sstFooterSize})
 	if err != nil {
 		t.Fatal(err)
 	}

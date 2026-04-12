@@ -8,14 +8,28 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/dgraph-io/badger/v4"
 	_ "github.com/mattn/go-sqlite3"
 	bolt "go.etcd.io/bbolt"
 
 	"github.com/germtb/protodb"
 )
+
+func now() time.Time          { return time.Now() }
+func since(t time.Time) time.Duration { return time.Since(t) }
+
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1024*1024:
+		return fmt.Sprintf("%.1f MB", float64(b)/(1024*1024))
+	case b >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(b)/1024)
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
 
 var boltBucket = []byte("kv")
 
@@ -78,17 +92,6 @@ func poolKey(idx int) []byte {
 func initPebble(b *testing.B) *pebble.DB {
 	b.Helper()
 	db, err := pebble.Open(filepath.Join(b.TempDir(), "pebble"), &pebble.Options{})
-	if err != nil {
-		b.Fatal(err)
-	}
-	return db
-}
-
-func initBadger(b *testing.B) *badger.DB {
-	b.Helper()
-	opts := badger.DefaultOptions(filepath.Join(b.TempDir(), "badger"))
-	opts.Logger = nil
-	db, err := badger.Open(opts)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -174,22 +177,6 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 			}
 		})
 
-		// --- BadgerDB: N Puts in a transaction ---
-		b.Run(fmt.Sprintf("Write%d/Badger", batchSize), func(b *testing.B) {
-			db := initBadger(b)
-			defer db.Close()
-			b.ResetTimer()
-			for iter := 0; iter < b.N; iter++ {
-				txn := db.NewTransaction(true)
-				for idx := 0; idx < batchSize; idx++ {
-					txn.Set(poolKey(iter*batchSize+idx), val)
-				}
-				if err := txn.Commit(); err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
-
 	}
 
 	// --- Get: single key lookup after populating + flushing ---
@@ -251,30 +238,6 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 		}
 	})
 
-	b.Run("Get/Badger", func(b *testing.B) {
-		db := initBadger(b)
-		defer db.Close()
-		txn := db.NewTransaction(true)
-		for idx := 0; idx < populateSize; idx++ {
-			txn.Set(uint64Key(uint64(idx)), val)
-			if idx%500 == 0 {
-				txn.Commit()
-				txn = db.NewTransaction(true)
-			}
-		}
-		txn.Commit()
-		b.ResetTimer()
-		for iter := 0; iter < b.N; iter++ {
-			txn := db.NewTransaction(false)
-			item, err := txn.Get(poolKey(iter % populateSize))
-			if err != nil {
-				b.Fatal(err)
-			}
-			item.ValueCopy(nil)
-			txn.Discard()
-		}
-	})
-
 	b.Run("Get/Bolt", func(b *testing.B) {
 		db := initBolt(b)
 		defer db.Close()
@@ -290,6 +253,54 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 			db.View(func(tx *bolt.Tx) error {
 				bucket := tx.Bucket(boltBucket)
 				_ = bucket.Get(poolKey(iter % populateSize))
+				return nil
+			})
+		}
+	})
+
+	// --- GetMiss: lookup keys that don't exist ---
+
+	b.Run("GetMiss/LSM", func(b *testing.B) {
+		engine := initLSM(b)
+		defer engine.Close()
+		for idx := 0; idx < populateSize; idx++ {
+			engine.Put(uint64Key(uint64(idx*2)), val) // even keys only
+		}
+		engine.Flush()
+		engine.Compact()
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			engine.Get(uint64Key(uint64(iter*2 + 1))) // odd keys: always miss
+		}
+	})
+
+	b.Run("GetMiss/Pebble", func(b *testing.B) {
+		db := initPebble(b)
+		defer db.Close()
+		for idx := 0; idx < populateSize; idx++ {
+			db.Set(uint64Key(uint64(idx*2)), val, pebble.NoSync)
+		}
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			db.Get(uint64Key(uint64(iter*2 + 1)))
+		}
+	})
+
+	b.Run("GetMiss/Bolt", func(b *testing.B) {
+		db := initBolt(b)
+		defer db.Close()
+		db.Update(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket(boltBucket)
+			for idx := 0; idx < populateSize; idx++ {
+				bucket.Put(uint64Key(uint64(idx*2)), val)
+			}
+			return nil
+		})
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			db.View(func(tx *bolt.Tx) error {
+				bucket := tx.Bucket(boltBucket)
+				_ = bucket.Get(uint64Key(uint64(iter*2 + 1)))
 				return nil
 			})
 		}
@@ -369,42 +380,6 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 				count++
 			}
 			it.Close()
-			if count != 1000 {
-				b.Fatalf("expected 1000 entries, got %d", count)
-			}
-		}
-	})
-
-	b.Run("Scan1000/Badger", func(b *testing.B) {
-		db := initBadger(b)
-		defer db.Close()
-		txn := db.NewTransaction(true)
-		for idx := 0; idx < populateSize; idx++ {
-			txn.Set(uint64Key(uint64(idx)), val)
-			if idx%500 == 0 {
-				txn.Commit()
-				txn = db.NewTransaction(true)
-			}
-		}
-		txn.Commit()
-		lo := uint64Key(0)
-		hi := uint64Key(1000)
-		b.ResetTimer()
-		for iter := 0; iter < b.N; iter++ {
-			txn := db.NewTransaction(false)
-			opts := badger.DefaultIteratorOptions
-			it := txn.NewIterator(opts)
-			count := 0
-			for it.Seek(lo); it.Valid(); it.Next() {
-				item := it.Item()
-				if bytes.Compare(item.Key(), hi) >= 0 {
-					break
-				}
-				item.ValueCopy(nil)
-				count++
-			}
-			it.Close()
-			txn.Discard()
 			if count != 1000 {
 				b.Fatalf("expected 1000 entries, got %d", count)
 			}
@@ -683,6 +658,59 @@ func BenchmarkCompaction(b *testing.B) {
 	}
 }
 
+// TestCompactionOverTime measures how compaction cost grows as L1 gets larger.
+// Not a benchmark (uses t.Log) because we want to observe the progression,
+// not a single averaged number.
+func TestCompactionOverTime(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := protodb.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Disable auto-compaction so we control when it happens.
+	engine.SetPolicy(&protodb.Policy{
+		FlushThreshold:      1024 * 1024 * 64, // 64MB — won't trigger auto-flush
+		CompactionThreshold: 1000,              // effectively disable auto-compact
+	})
+
+	val := make([]byte, 100) // 100-byte values
+	const batchSize = 10000  // entries per flush (~1.2MB per batch)
+	const rounds = 120       // enough to reach 8+ L1 SSTs (~140 MB)
+
+	t.Logf("%-8s  %-12s  %-12s  %-10s  %-10s", "Round", "L1 SSTs", "L1 Size", "Compact ms", "Get ns")
+
+	for round := 0; round < rounds; round++ {
+		// Write a batch of entries with keys spread across the full range.
+		// Use round*batchSize offset so data accumulates over time.
+		for i := 0; i < batchSize; i++ {
+			k := uint64(round*batchSize + i)
+			engine.Put(uint64Key(k), val)
+		}
+		engine.Flush()
+
+		// Measure compaction time
+		compactStart := now()
+		engine.Compact()
+		compactDur := since(compactStart)
+
+		// Measure Get latency (sample 100 keys)
+		getStart := now()
+		for i := 0; i < 100; i++ {
+			k := uint64(round*batchSize + i)
+			engine.Get(uint64Key(k))
+		}
+		getDur := since(getStart) / 100
+
+		// Count L1 state
+		l1SSTs, l1Size := engine.L1Stats()
+
+		t.Logf("%-8d  %-12d  %-12s  %-10.1f  %-10d",
+			round+1, l1SSTs, formatBytes(l1Size), float64(compactDur.Microseconds())/1000.0, getDur.Nanoseconds())
+	}
+}
+
 // BenchmarkBlockSize measures Get and Scan performance at different block sizes.
 func BenchmarkBlockSize(b *testing.B) {
 	val := mustMarshal(b, makeItem(0))
@@ -887,25 +915,4 @@ func TestMemoryFootprint(t *testing.T) {
 	pebbleHeap := measure() - before
 	t.Logf("Pebble: %d KB heap (%d entries)", pebbleHeap/1024, entryCount)
 	db.Close()
-
-	// --- Badger ---
-	before = measure()
-	opts := badger.DefaultOptions(filepath.Join(t.TempDir(), "badger"))
-	opts.Logger = nil
-	bdb, err := badger.Open(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	txn := bdb.NewTransaction(true)
-	for idx := 0; idx < entryCount; idx++ {
-		txn.Set(uint64Key(uint64(idx)), val)
-		if idx%500 == 0 {
-			txn.Commit()
-			txn = bdb.NewTransaction(true)
-		}
-	}
-	txn.Commit()
-	badgerHeap := measure() - before
-	t.Logf("Badger: %d KB heap (%d entries)", badgerHeap/1024, entryCount)
-	bdb.Close()
 }
