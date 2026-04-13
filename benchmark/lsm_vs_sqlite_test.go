@@ -19,7 +19,7 @@ import (
 	"github.com/germtb/protodb"
 )
 
-func now() time.Time          { return time.Now() }
+func now() time.Time                  { return time.Now() }
 func since(t time.Time) time.Duration { return time.Since(t) }
 
 func formatBytes(b int64) string {
@@ -181,7 +181,7 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 				for idx := 0; idx < batchSize; idx++ {
 					tx.Put(poolKey(iter*batchSize+idx), val)
 				}
-				if err := tx.Apply(); err != nil {
+				if err := tx.Commit(); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -823,7 +823,7 @@ func TestCompactionOverTime(t *testing.T) {
 	// Disable auto-compaction so we control when it happens.
 	engine.SetPolicy(&protodb.Policy{
 		FlushThreshold:      1024 * 1024 * 64, // 64MB — won't trigger auto-flush
-		CompactionThreshold: 1000,              // effectively disable auto-compact
+		CompactionThreshold: 1000,             // effectively disable auto-compact
 	})
 
 	const batchSize = 10000 // entries per flush (~1.2MB per batch)
@@ -1077,7 +1077,7 @@ func TestMemoryFootprint(t *testing.T) {
 func TestCompressionRatio(t *testing.T) {
 	val := make([]byte, 100)
 	for i := range val {
-		val[i] = byte(i % 26 + 'a') // compressible: repeating lowercase letters
+		val[i] = byte(i%26 + 'a') // compressible: repeating lowercase letters
 	}
 
 	dir := t.TempDir()

@@ -94,8 +94,10 @@ func (wal *WAL) flush() error {
 	if err != nil {
 		return err
 	}
-	_, err = wal.handle.Write(wal.buf.Bytes())
-	wal.buf.Reset()
+	n, err := wal.handle.Write(wal.buf.Bytes())
+	// Drop whatever bytes made it to the fd — the fd position advanced by n,
+	// so on retry we must not re-write them.
+	wal.buf.Next(n)
 	return err
 }
 
@@ -299,7 +301,7 @@ func (wal *WAL) replay(table *memtable) error {
 	}
 
 	if comittedOffset < len(data) {
-		log.Printf("WAL was correupted. Dropped %d bytes", len(data)-comittedOffset)
+		log.Printf("WAL was corrupted. Dropped %d bytes", len(data)-comittedOffset)
 	}
 
 	return nil

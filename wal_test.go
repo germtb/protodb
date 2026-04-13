@@ -507,7 +507,7 @@ func TestWALPartialTransaction(t *testing.T) {
 	for i := uint64(1); i <= 5; i++ {
 		tx.Put(walKey(i), []byte("value"))
 	}
-	if err := tx.Apply(); err != nil {
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	if err := engine.Close(); err != nil {
@@ -562,7 +562,7 @@ func TestWALBatchMidCorruption(t *testing.T) {
 	for i := uint64(1); i <= 5; i++ {
 		tx.Put(walKey(i), []byte("value"))
 	}
-	if err := tx.Apply(); err != nil {
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	if err := engine.Close(); err != nil {

@@ -135,13 +135,13 @@ func (e *Engine) Close() error {
 func (e *Engine) Put(key Key, value []byte) error {
 	tx := e.Transaction()
 	tx.Put(key, value)
-	return tx.Apply()
+	return tx.Commit()
 }
 
 func (e *Engine) Delete(key Key) error {
 	tx := e.Transaction()
 	tx.Delete(key)
-	return tx.Apply()
+	return tx.Commit()
 }
 
 func (e *Engine) GetInSST(s *sst, key Key) ([]byte, error) {
@@ -736,7 +736,7 @@ func (tx *Transaction) Get(key Key) ([]byte, error) {
 	return tx.engine.getLocked(key)
 }
 
-func (tx *Transaction) Apply() error {
+func (tx *Transaction) Commit() error {
 	defer tx.engine.flushMutex.Unlock()
 
 	batch := tx.engine.wal.Batch()

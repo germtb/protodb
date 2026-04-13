@@ -26,7 +26,7 @@ func TestMemtableBeforeWAL(t *testing.T) {
 	k, v := Key("phantom"), []byte("phantom-value")
 	tx := engine.Transaction()
 	tx.Put(k, v)
-	if err := tx.Apply(); err == nil {
+	if err := tx.Commit(); err == nil {
 		t.Fatal("expected Apply to fail with closed WAL handle")
 	}
 
