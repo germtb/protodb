@@ -103,7 +103,7 @@ type reader interface {
 const Version uint16 = 1
 const tombstone uint32 = 0xFFFFFFFF
 const sstFooterSize int64 = 8 + 8 + 2 // BlockIndexSize + BlockCount + Version
-var SSTSize int = 1024 * 1024 * 16    // 16 Mb
+var SSTSize int = 1024 * 1024 * 64    // 64 Mb
 
 // Linear tree block constants
 const noChild uint16 = 0xFFFF

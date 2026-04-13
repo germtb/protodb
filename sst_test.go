@@ -9,38 +9,11 @@ import (
 	"testing"
 )
 
-type sliceIterator struct {
-	pairs []struct {
-		key   Key
-		value []byte
-	}
-	pos int
+func entriesFrom(entries []KeyValue) *sliceIterator {
+	return &sliceIterator{entries: entries, index: -1}
 }
 
-func (it *sliceIterator) Next() bool {
-	it.pos++
-	return it.pos < len(it.pairs)
-}
-
-func (it *sliceIterator) Key() Key {
-	return it.pairs[it.pos].key
-}
-
-func (it *sliceIterator) Value() []byte {
-	return it.pairs[it.pos].value
-}
-
-func entriesFrom(pairs []struct {
-	key   Key
-	value []byte
-}) *sliceIterator {
-	return &sliceIterator{pairs: pairs, pos: -1}
-}
-
-func writeTestSST(t *testing.T, pairs []struct {
-	key   Key
-	value []byte
-}) (*sst, string) {
+func writeTestSST(t *testing.T, pairs []KeyValue) (*sst, string) {
 	t.Helper()
 	dir := t.TempDir()
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
@@ -71,10 +44,7 @@ func openSSTFile(t *testing.T, dir string, s *sst) *os.File {
 
 func TestWriteReadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{
+	pairs := []KeyValue{
 		{key(1), []byte("hello")},
 		{key(2), []byte("world")},
 		{key(3), []byte("foo")},
@@ -97,22 +67,19 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	for _, p := range pairs {
-		got, err := s.Get(p.key, f)
+		got, err := s.Get(p.Key, f)
 		if err != nil {
-			t.Fatalf("Get(%v): %v", p.key, err)
+			t.Fatalf("Get(%v): %v", p.Key, err)
 		}
-		if string(got) != string(p.value) {
-			t.Errorf("Get(%v): got %q, want %q", p.key, got, p.value)
+		if string(got) != string(p.Value) {
+			t.Errorf("Get(%v): got %q, want %q", p.Key, got, p.Value)
 		}
 	}
 }
 
 func TestEmptySST(t *testing.T) {
 	dir := t.TempDir()
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{}
+	pairs := []KeyValue{}
 
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
 	if err != nil {
@@ -125,10 +92,7 @@ func TestEmptySST(t *testing.T) {
 }
 
 func TestSingleEntry(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(42), []byte("only-one")},
 	})
 	f := openSSTFile(t, dir, s)
@@ -145,13 +109,10 @@ func TestSingleEntry(t *testing.T) {
 func TestLargeSST(t *testing.T) {
 	// 5000 entries — forces multiple blocks and exercises the block index re-read path.
 	const n = 5000
-	pairs := make([]struct {
-		key   Key
-		value []byte
-	}, n)
+	pairs := make([]KeyValue, n)
 	for i := range pairs {
-		pairs[i].key = key(uint64(i))
-		pairs[i].value = []byte{byte(i), byte(i >> 8)}
+		pairs[i].Key = key(uint64(i))
+		pairs[i].Value = []byte{byte(i), byte(i >> 8)}
 	}
 
 	s, dir := writeTestSST(t, pairs)
@@ -171,10 +132,7 @@ func TestLargeSST(t *testing.T) {
 
 func TestCustomTailSize(t *testing.T) {
 	dir := t.TempDir()
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{
+	pairs := []KeyValue{
 		{key(1), []byte("aaa")},
 		{key(2), []byte("bbb")},
 		{key(3), []byte("ccc")},
@@ -194,12 +152,12 @@ func TestCustomTailSize(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	for _, p := range pairs {
-		got, err := s.Get(p.key, f)
+		got, err := s.Get(p.Key, f)
 		if err != nil {
-			t.Fatalf("Get(%v): %v", p.key, err)
+			t.Fatalf("Get(%v): %v", p.Key, err)
 		}
-		if string(got) != string(p.value) {
-			t.Errorf("Get(%v): got %q, want %q", p.key, got, p.value)
+		if string(got) != string(p.Value) {
+			t.Errorf("Get(%v): got %q, want %q", p.Key, got, p.Value)
 		}
 	}
 }
@@ -212,10 +170,7 @@ func TestReadNonExistentFile(t *testing.T) {
 }
 
 func TestEmptyValueRoundTrip(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), []byte{}},
 		{key(2), []byte("between-empties")},
 		{key(3), []byte{}},
@@ -253,10 +208,7 @@ func TestLargeValues(t *testing.T) {
 		big[i] = byte(i % 251)
 	}
 
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), big},
 		{key(2), []byte("small")},
 		{key(3), big},
@@ -288,10 +240,7 @@ func TestLargeValues(t *testing.T) {
 
 func TestWriteUnsortedKeysError(t *testing.T) {
 	dir := t.TempDir()
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{
+	pairs := []KeyValue{
 		{key(3), []byte("c")},
 		{key(1), []byte("a")},
 	}
@@ -303,10 +252,7 @@ func TestWriteUnsortedKeysError(t *testing.T) {
 
 func TestWriteDuplicateKeysError(t *testing.T) {
 	dir := t.TempDir()
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{
+	pairs := []KeyValue{
 		{key(1), []byte("a")},
 		{key(1), []byte("b")},
 	}
@@ -317,10 +263,7 @@ func TestWriteDuplicateKeysError(t *testing.T) {
 }
 
 func TestWriteKeyZeroAllowed(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(0), []byte("zero")},
 		{key(1), []byte("one")},
 	})
@@ -337,10 +280,7 @@ func TestWriteKeyZeroAllowed(t *testing.T) {
 
 func TestReadBadVersionError(t *testing.T) {
 	dir := t.TempDir()
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{
+	pairs := []KeyValue{
 		{key(1), []byte("x")},
 	}
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
@@ -371,10 +311,7 @@ func TestReadBadVersionError(t *testing.T) {
 // --- Get tests ---
 
 func TestGetFound(t *testing.T) {
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{
+	pairs := []KeyValue{
 		{key(10), []byte("ten")},
 		{key(20), []byte("twenty")},
 		{key(30), []byte("thirty")},
@@ -383,21 +320,18 @@ func TestGetFound(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	for _, p := range pairs {
-		got, err := s.Get(p.key, f)
+		got, err := s.Get(p.Key, f)
 		if err != nil {
-			t.Fatalf("Get(%v): %v", p.key, err)
+			t.Fatalf("Get(%v): %v", p.Key, err)
 		}
-		if string(got) != string(p.value) {
-			t.Errorf("Get(%v): got %q, want %q", p.key, got, p.value)
+		if string(got) != string(p.Value) {
+			t.Errorf("Get(%v): got %q, want %q", p.Key, got, p.Value)
 		}
 	}
 }
 
 func TestGetNotFound(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(10), []byte("ten")},
 		{key(20), []byte("twenty")},
 	})
@@ -412,10 +346,7 @@ func TestGetNotFound(t *testing.T) {
 }
 
 func TestGetEmptySST(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{})
+	s, dir := writeTestSST(t, []KeyValue{})
 	f := openSSTFile(t, dir, s)
 
 	_, err := s.Get(key(1), f)
@@ -425,10 +356,7 @@ func TestGetEmptySST(t *testing.T) {
 }
 
 func TestGetFirstAndLastEntry(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), []byte("first")},
 		{key(2), []byte("middle")},
 		{key(3), []byte("last")},
@@ -453,10 +381,7 @@ func TestGetFirstAndLastEntry(t *testing.T) {
 }
 
 func TestGetSingleEntry(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(42), []byte("only")},
 	})
 	f := openSSTFile(t, dir, s)
@@ -476,10 +401,7 @@ func TestGetSingleEntry(t *testing.T) {
 }
 
 func TestGetEmptyValue(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), []byte{}},
 		{key(2), []byte("nonempty")},
 		{key(3), []byte{}},
@@ -514,10 +436,7 @@ func TestGetEmptyValue(t *testing.T) {
 // --- Scan tests ---
 
 func TestScanFullRange(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(10), []byte("a")},
 		{key(20), []byte("b")},
 		{key(30), []byte("c")},
@@ -544,10 +463,7 @@ func TestScanFullRange(t *testing.T) {
 }
 
 func TestScanSubRange(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(10), []byte("a")},
 		{key(20), []byte("b")},
 		{key(30), []byte("c")},
@@ -571,10 +487,7 @@ func TestScanSubRange(t *testing.T) {
 }
 
 func TestScanEmptySST(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{})
+	s, dir := writeTestSST(t, []KeyValue{})
 	f := openSSTFile(t, dir, s)
 
 	count := 0
@@ -588,10 +501,7 @@ func TestScanEmptySST(t *testing.T) {
 }
 
 func TestScanNoMatch(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(10), []byte("a")},
 		{key(20), []byte("b")},
 	})
@@ -608,10 +518,7 @@ func TestScanNoMatch(t *testing.T) {
 }
 
 func TestScanSingleEntry(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(42), []byte("only")},
 	})
 	f := openSSTFile(t, dir, s)
@@ -627,10 +534,7 @@ func TestScanSingleEntry(t *testing.T) {
 }
 
 func TestScanExactBoundaries(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(10), []byte("a")},
 		{key(20), []byte("b")},
 		{key(30), []byte("c")},
@@ -652,10 +556,7 @@ func TestScanExactBoundaries(t *testing.T) {
 }
 
 func TestScanBreakEarly(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), []byte("a")},
 		{key(2), []byte("b")},
 		{key(3), []byte("c")},
@@ -681,10 +582,7 @@ func TestScanBreakEarly(t *testing.T) {
 }
 
 func TestScanEmptyValues(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), []byte{}},
 		{key(2), []byte("mid")},
 		{key(3), []byte{}},
@@ -705,10 +603,7 @@ func TestScanEmptyValues(t *testing.T) {
 }
 
 func TestScanLastEntry(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(10), []byte("first")},
 		{key(20), []byte("last")},
 	})
@@ -727,10 +622,7 @@ func TestScanLastEntry(t *testing.T) {
 // --- Tombstone tests ---
 
 func TestGetTombstone(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), []byte("alive")},
 		{key(2), nil},
 		{key(3), []byte("also alive")},
@@ -760,10 +652,7 @@ func TestGetTombstone(t *testing.T) {
 }
 
 func TestScanYieldsTombstones(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), []byte("a")},
 		{key(2), nil},
 		{key(3), []byte("c")},
@@ -791,10 +680,7 @@ func TestScanYieldsTombstones(t *testing.T) {
 }
 
 func TestTombstoneFirst(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), nil},
 		{key(2), []byte("second")},
 	})
@@ -815,10 +701,7 @@ func TestTombstoneFirst(t *testing.T) {
 }
 
 func TestTombstoneLast(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), []byte("first")},
 		{key(2), nil},
 	})
@@ -839,10 +722,7 @@ func TestTombstoneLast(t *testing.T) {
 }
 
 func TestAllTombstones(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), nil},
 		{key(2), nil},
 		{key(3), nil},
@@ -870,10 +750,7 @@ func TestAllTombstones(t *testing.T) {
 }
 
 func TestGetMissingKeyInTombstoneSST(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), []byte("alive")},
 		{key(2), nil},
 		{key(3), []byte("also alive")},
@@ -887,10 +764,7 @@ func TestGetMissingKeyInTombstoneSST(t *testing.T) {
 }
 
 func TestTombstoneBetweenEmptyValues(t *testing.T) {
-	s, dir := writeTestSST(t, []struct {
-		key   Key
-		value []byte
-	}{
+	s, dir := writeTestSST(t, []KeyValue{
 		{key(1), []byte{}},
 		{key(2), nil},
 		{key(3), []byte{}},

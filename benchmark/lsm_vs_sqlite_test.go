@@ -98,6 +98,30 @@ func initPebble(b *testing.B) *pebble.DB {
 	return db
 }
 
+func initPebbleT(t *testing.T) *pebble.DB {
+	t.Helper()
+	db, err := pebble.Open(filepath.Join(t.TempDir(), "pebble"), &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func initBoltT(t *testing.T) *bolt.DB {
+	t.Helper()
+	db, err := bolt.Open(filepath.Join(t.TempDir(), "bolt.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(boltBucket)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
 func initLSM(b *testing.B) *protodb.Engine {
 	b.Helper()
 	engine, err := protodb.Open(b.TempDir())
@@ -417,6 +441,131 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 	})
 }
 
+// TestLoadedPerformance measures Get, GetMiss, and Scan after populating
+// ~500 MB of data. Uses Test (not Benchmark) to avoid re-populating per
+// sub-benchmark. Each engine is populated once, then all ops are timed.
+func TestLoadedPerformance(t *testing.T) {
+	val := make([]byte, 100)
+	const totalEntries = 4_300_000 // ~500 MB at 120 bytes/entry
+	const batchSize = 10000
+	const samples = 1_000_000
+
+	measure := func(name string, fn func(i int)) {
+		start := now()
+		for i := 0; i < samples; i++ {
+			fn(i)
+		}
+		dur := since(start)
+		t.Logf("%-25s  %d ns/op", name, dur.Nanoseconds()/int64(samples))
+	}
+
+	// --- LSM ---
+	t.Log("Loading LSM...")
+	engine, _ := protodb.Open(t.TempDir())
+	engine.SetPolicy(&protodb.Policy{
+		FlushThreshold:      1024 * 1024 * 64,
+		CompactionThreshold: 1000,
+	})
+	for idx := 0; idx < totalEntries; idx++ {
+		engine.Put(uint64Key(uint64(idx)), val)
+		if (idx+1)%batchSize == 0 {
+			engine.Flush()
+			engine.Compact()
+		}
+	}
+	if totalEntries%batchSize != 0 {
+		engine.Flush()
+		engine.Compact()
+	}
+	l1Count, l1Size := engine.L1Stats()
+	t.Logf("LSM loaded: %d SSTs, %.1f MB", l1Count, float64(l1Size)/(1024*1024))
+
+	measure("Get/LSM", func(i int) {
+		engine.Get(poolKey(i % totalEntries))
+	})
+	measure("GetMiss/LSM", func(i int) {
+		engine.Get(uint64Key(uint64(totalEntries + i))) // keys past the range
+	})
+	measure("Scan1000/LSM", func(i int) {
+		scanner := engine.Scan(poolKey(0), poolKey(1000))
+		for scanner.Next() {
+		}
+	})
+	engine.Close()
+
+	// --- Pebble ---
+	t.Log("Loading Pebble...")
+	pdb := initPebbleT(t)
+	batch := pdb.NewBatch()
+	for idx := 0; idx < totalEntries; idx++ {
+		batch.Set(uint64Key(uint64(idx)), val, nil)
+		if (idx+1)%batchSize == 0 {
+			batch.Commit(pebble.NoSync)
+			batch = pdb.NewBatch()
+		}
+	}
+	if batch.Count() > 0 {
+		batch.Commit(pebble.NoSync)
+	}
+	pdb.Flush()
+	pdb.Compact(uint64Key(0), uint64Key(uint64(totalEntries)), true)
+	t.Log("Pebble loaded")
+
+	measure("Get/Pebble", func(i int) {
+		v, closer, err := pdb.Get(poolKey(i % totalEntries))
+		if err != nil {
+			return
+		}
+		_ = v
+		closer.Close()
+	})
+	measure("GetMiss/Pebble", func(i int) {
+		pdb.Get(uint64Key(uint64(totalEntries + i)))
+	})
+	lo := uint64Key(0)
+	hi := uint64Key(1000)
+	measure("Scan1000/Pebble", func(i int) {
+		it, _ := pdb.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+		for it.First(); it.Valid(); it.Next() {
+			_ = it.Value()
+		}
+		it.Close()
+	})
+	pdb.Close()
+
+	// --- Bolt ---
+	t.Log("Loading Bolt...")
+	bdb := initBoltT(t)
+	for start := 0; start < totalEntries; start += batchSize {
+		end := start + batchSize
+		if end > totalEntries {
+			end = totalEntries
+		}
+		bdb.Update(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket(boltBucket)
+			for idx := start; idx < end; idx++ {
+				bucket.Put(uint64Key(uint64(idx)), val)
+			}
+			return nil
+		})
+	}
+	t.Log("Bolt loaded")
+
+	measure("Get/Bolt", func(i int) {
+		bdb.View(func(tx *bolt.Tx) error {
+			_ = tx.Bucket(boltBucket).Get(poolKey(i % totalEntries))
+			return nil
+		})
+	})
+	measure("GetMiss/Bolt", func(i int) {
+		bdb.View(func(tx *bolt.Tx) error {
+			_ = tx.Bucket(boltBucket).Get(uint64Key(uint64(totalEntries + i)))
+			return nil
+		})
+	})
+	bdb.Close()
+}
+
 // BenchmarkSSTScaling measures how Get and Scan degrade as SSTs accumulate
 // without compaction. Each SST contains 100 entries with distinct keys.
 func BenchmarkSSTScaling(b *testing.B) {
@@ -677,7 +826,7 @@ func TestCompactionOverTime(t *testing.T) {
 
 	val := make([]byte, 100) // 100-byte values
 	const batchSize = 10000  // entries per flush (~1.2MB per batch)
-	const rounds = 120       // enough to reach 8+ L1 SSTs (~140 MB)
+	const rounds = 430       // ~500 MB final
 
 	t.Logf("%-8s  %-12s  %-12s  %-10s  %-10s", "Round", "L1 SSTs", "L1 Size", "Compact ms", "Get ns")
 
@@ -706,8 +855,10 @@ func TestCompactionOverTime(t *testing.T) {
 		// Count L1 state
 		l1SSTs, l1Size := engine.L1Stats()
 
-		t.Logf("%-8d  %-12d  %-12s  %-10.1f  %-10d",
-			round+1, l1SSTs, formatBytes(l1Size), float64(compactDur.Microseconds())/1000.0, getDur.Nanoseconds())
+		if round < 20 || round%10 == 9 {
+			t.Logf("%-8d  %-12d  %-12s  %-10.1f  %-10d",
+				round+1, l1SSTs, formatBytes(l1Size), float64(compactDur.Microseconds())/1000.0, getDur.Nanoseconds())
+		}
 	}
 }
 

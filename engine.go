@@ -546,28 +546,103 @@ func (e *Engine) Compact() error {
 	return e.compactLocked()
 }
 
+type KeyValue struct {
+	Key   Key
+	Value []byte
+}
+
+type sliceIterator struct {
+	entries []KeyValue
+	index   int
+}
+
+func iter(slice []KeyValue) *sliceIterator {
+	return &sliceIterator{entries: slice, index: -1}
+}
+
+func (it *sliceIterator) Next() bool {
+	it.index++
+	return it.index < len(it.entries)
+}
+
+func (it *sliceIterator) Key() Key     { return it.entries[it.index].Key }
+func (it *sliceIterator) Value() []byte { return it.entries[it.index].Value }
+
 func (e *Engine) compactLocked() error {
 	e.flushMutex.Lock()
-
 	l0ssts := make([]*sst, len(e.l0.ssts))
 	l1ssts := make([]*sst, len(e.l1.ssts))
 	copy(l0ssts, e.l0.ssts)
 	copy(l1ssts, e.l1.ssts)
-
 	e.flushMutex.Unlock()
 
-	entries := e.scan(
+	l0Entries := e.scan(
 		nil,
 		nil,
 		nil,
 		l0ssts,
-		l1ssts,
+		nil,
 	)
 
-	new_ssts, err := WriteSST(e.ObjectsPath(), entries)
+	var new_ssts []*sst
 
-	if err != nil {
-		return err
+	if len(l1ssts) == 0 {
+		written_ssts, err := WriteSST(e.ObjectsPath(), l0Entries)
+		if err != nil {
+			return err
+		}
+		new_ssts = append(new_ssts, written_ssts...)
+	} else {
+		entries := make([]KeyValue, 0)
+		l1Index := 0
+
+		finishRange := func() error {
+			// There is no overlap between l0 and l1, we can keep the old l1 sst
+			if len(entries) == 0 {
+				new_ssts = append(new_ssts, l1ssts[l1Index])
+			} else {
+				handle, err := e.fileTable.getOrOpen(l1ssts[l1Index].path)
+				if err != nil {
+					return err
+				}
+				l0Range := iter(entries)
+				l1Range := l1ssts[l1Index].Iterator(nil, nil, handle)
+				mergedRange := newMergeIterator([]Iterator{l0Range, l1Range})
+				rangeSsts, err := WriteSST(
+					e.ObjectsPath(),
+					mergedRange,
+				)
+				if err != nil {
+					return err
+				}
+				new_ssts = append(new_ssts, rangeSsts...)
+			}
+
+			entries = entries[:0]
+			l1Index++
+			return nil
+		}
+
+		for l0Entries.Next() {
+			key := l0Entries.Key()
+			value := l0Entries.Value()
+
+			for l1Index+1 < len(l1ssts) && bytes.Compare(key, l1ssts[l1Index+1].firstKey) >= 0 {
+				err := finishRange()
+				if err != nil {
+					return err
+				}
+			}
+
+			entries = append(entries, KeyValue{Key: key, Value: value})
+		}
+
+		for l1Index < len(l1ssts) {
+			err := finishRange()
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	e.flushMutex.Lock()
@@ -578,7 +653,7 @@ func (e *Engine) compactLocked() error {
 		e.l1.manifest.Append(sst.hash)
 	}
 
-	err = e.l1.manifest.Save()
+	err := e.l1.manifest.Save()
 	if err != nil {
 		return err
 	}
