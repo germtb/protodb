@@ -11,9 +11,9 @@ import (
 
 WAL frame layout:
 
-┌───────────┬──────────────┬─────┬──────────────┬───────┐
-│ crc32 u32 │ key_len u32  │ key │ value_len u32│ value │
-└───────────┴──────────────┴─────┴──────────────┴───────┘
+┌───────────┬──────────────┬─────┬───────────────┬───────┐
+│ crc32 u32 │ key_len u32  │ key │ value_len u32 │ value │
+└───────────┴──────────────┴─────┴───────────────┴───────┘
 
 crc32:     checksum of (key_len + key + value_len + value)
 value_len: byte length of value, or tombstone (0xFFFFFFFF) for deletes

@@ -263,9 +263,9 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 		if err != nil {
 			return err
 		}
-		if err := syncDir(path); err != nil {
-			return err
-		}
+		// No dir fsync here — the subsequent manifest fsync (which is what
+		// actually commits this SST into the engine's view) forces a
+		// metadata-journal commit that persists this rename on ext4/APFS.
 
 		ssts = append(ssts, &sst{
 			cache:    newLRU[uint64, sstBlock](128, nil),

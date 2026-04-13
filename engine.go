@@ -527,6 +527,9 @@ func (e *Engine) flushLocked() error {
 	if err != nil {
 		return err
 	}
+	if err := e.l0.manifest.Sync(); err != nil {
+		return err
+	}
 
 	e.l0.ssts = append(new_ssts, e.l0.ssts...)
 	e.memtable = newMemtable()
@@ -631,6 +634,13 @@ func (e *Engine) compactLocked() error {
 		return err
 	}
 	e.l0.ssts = e.l0.ssts[:len(e.l0.ssts)-len(l0ssts)]
+
+	if err := e.l1.manifest.Sync(); err != nil {
+		return err
+	}
+	if err := e.l0.manifest.Sync(); err != nil {
+		return err
+	}
 
 	return e.gcLocked()
 }

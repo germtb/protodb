@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"math"
 	"math/rand"
 	"os"
@@ -4638,9 +4639,15 @@ func TestCorruptedManifestInvalidHash(t *testing.T) {
 	}
 	engine.Close()
 
-	// Replace the L1 manifest content with a nonexistent hash
+	// Write a valid manifest record that references a hash with no SST file.
 	manifestPath := filepath.Join(dir, "protodb", "l1")
-	if err := os.WriteFile(manifestPath, []byte("deadbeefdeadbeefdeadbeefdeadbeef\n"), 0644); err != nil {
+	record := make([]byte, 4+4+32)
+	binary.BigEndian.PutUint32(record[4:8], 1)
+	for i := 0; i < 32; i++ {
+		record[8+i] = 0xde
+	}
+	binary.BigEndian.PutUint32(record[0:4], crc32.ChecksumIEEE(record[4:]))
+	if err := os.WriteFile(manifestPath, record, 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4663,20 +4670,26 @@ func TestCorruptedManifestPartialLine(t *testing.T) {
 	}
 	engine.Close()
 
-	// Append a partial line (half a SHA256 hash, no newline) to the L0 manifest
+	// Append garbage (partial record) after the last valid snapshot.
+	// The new manifest format should auto-truncate on reopen and still
+	// recover the previously-committed state.
 	manifestPath := filepath.Join(dir, "protodb", "l0")
 	file, err := os.OpenFile(manifestPath, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Write half a SHA256 hash (32 hex chars instead of 64) as a partial/invalid entry
-	file.WriteString("abcdef1234567890abcdef1234567890")
+	file.Write([]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
 	file.Close()
 
-	_, err = Open(dir)
-	if err == nil {
-		t.Fatal("expected error when reopening with partial manifest line, got nil")
+	engine2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen should recover from trailing garbage, got err: %v", err)
 	}
+	got, _ := engine2.Get(key(1))
+	if string(got) != "value1" {
+		t.Fatalf("after auto-truncate reopen: Get(1) = %q, want %q", got, "value1")
+	}
+	engine2.Close()
 }
 
 func TestZeroLengthSSTFile(t *testing.T) {
@@ -5313,9 +5326,15 @@ func TestCorruptedL0Manifest(t *testing.T) {
 
 	engine.Close()
 
-	// Corrupt the L0 manifest by writing references to non-existent SST files.
+	// Write a valid manifest record that references a hash with no SST file.
 	manifestPath := filepath.Join(dir, "protodb", "l0")
-	if err := os.WriteFile(manifestPath, []byte("not-a-real-hash\ncorrupt-garbage\n"), 0644); err != nil {
+	record := make([]byte, 4+4+32) // crc + len + one hash
+	binary.BigEndian.PutUint32(record[4:8], 1)
+	for i := 0; i < 32; i++ {
+		record[8+i] = 0xaa
+	}
+	binary.BigEndian.PutUint32(record[0:4], crc32.ChecksumIEEE(record[4:]))
+	if err := os.WriteFile(manifestPath, record, 0644); err != nil {
 		t.Fatal(err)
 	}
 
