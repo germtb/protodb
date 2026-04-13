@@ -4,26 +4,47 @@ import (
 	"bytes"
 	"encoding/binary"
 	"hash/crc32"
-	"io"
+	"log"
 	"os"
 )
 
-// WAL frame layout:
-//
-// ┌───────────┬──────────────┬─────┬──────────────┬───────┐
-// │ crc32 u32 │ key_len u32  │ key │ value_len u32│ value │
-// └───────────┴──────────────┴─────┴──────────────┴───────┘
-//
-// crc32:     checksum of (key_len + key + value_len + value)
-// value_len: byte length of value, or tombstone (0xFFFFFFFF) for deletes
-//
-// On replay, a frame with a bad checksum or short read stops replay.
-// The file is truncated to the end of the last valid frame.
+/*
+
+WAL frame layout:
+
+┌───────────┬──────────────┬─────┬──────────────┬───────┐
+│ crc32 u32 │ key_len u32  │ key │ value_len u32│ value │
+└───────────┴──────────────┴─────┴──────────────┴───────┘
+
+crc32:     checksum of (key_len + key + value_len + value)
+value_len: byte length of value, or tombstone (0xFFFFFFFF) for deletes
+
+Commit marker layout:
+
+┌─────────────┬──────────────────┐
+│ padding u32 │ key_len = 0xFFFF │  ← impossible key_len signals a commit
+└─────────────┴──────────────────┘
+
+┌───────────┐
+│   frame   │
+│   frame   │
+│   frame   │
+│   commit  │
+│   frame   │
+│   frame   │
+│   commit  │
+│   ...     │
+└───────────┘
+
+On replay, frames are buffered until a commit marker is seen.
+A bad checksum or short read stops replay. Uncommitted
+trailing frames are silently dropped (normal after a crash).
+
+*/
 
 const walChecksumSize = 4
-const keyLenSize = 4
-const valueLenSize = 4
 const walTombstone uint32 = 0xFFFFFFFF
+const commitKeyLen uint32 = 0xFFFFFFFF
 
 const DefaultWALFlushBytes int = 32 * 1024 // 32Kb
 const DefaultWALSyncBytes int = 0          // Rely on the OS
@@ -133,9 +154,11 @@ func (wal *WAL) maybeSync() error {
 }
 
 func (batch *WALBatch) Commit() error {
-	bytes := batch.buf.Bytes()
-	batch.wal.buf.Write(bytes)
-	batch.wal.unsyncedBytes += len(bytes)
+	data := batch.buf.Bytes()
+	batch.wal.buf.Write(data)
+	writeU32(&batch.wal.buf, 0)
+	writeU32(&batch.wal.buf, commitKeyLen)
+	batch.wal.unsyncedBytes += len(data) + 8
 
 	err := batch.wal.maybeFlush()
 	if err != nil {
@@ -151,32 +174,20 @@ func (batch *WALBatch) Commit() error {
 }
 
 func writeFrame(buf *bytes.Buffer, key Key, value []byte) {
-	var valueLen uint32
+	valueLen := uint32(len(value))
 	if value == nil {
 		valueLen = walTombstone
-	} else {
-		valueLen = uint32(len(value))
 	}
 
-	frameSize := walChecksumSize + keyLenSize + len(key) + valueLenSize + len(value)
-	frame := make([]byte, frameSize)
+	crcStart := buf.Len()
+	writeU32(buf, 0) // CRC placeholder, patched below
+	writeU32(buf, uint32(len(key)))
+	buf.Write(key)
+	writeU32(buf, valueLen)
+	buf.Write(value)
 
-	// Build payload: key_len | key | value_len | value
-	pos := walChecksumSize
-	binary.BigEndian.PutUint32(frame[pos:], uint32(len(key)))
-	pos += 4
-	copy(frame[pos:], key)
-	pos += len(key)
-	binary.BigEndian.PutUint32(frame[pos:], valueLen)
-	pos += 4
-	if value != nil {
-		copy(frame[pos:], value)
-	}
-
-	// Compute checksum over payload and write it at the start
-	binary.BigEndian.PutUint32(frame[0:4], crc32.ChecksumIEEE(frame[walChecksumSize:]))
-
-	buf.Write(frame)
+	data := buf.Bytes()
+	binary.BigEndian.PutUint32(data[crcStart:], crc32.ChecksumIEEE(data[crcStart+walChecksumSize:]))
 }
 
 func (wal *WAL) Clear() error {
@@ -226,75 +237,69 @@ func (wal *WAL) replay(table *memtable) error {
 		return err
 	}
 
-	reader := bytes.NewReader(data)
-	var lastGoodOffset int64
+	entries := make([]KeyValue, 0)
+	offset := 0
+	comittedOffset := 0
 
-	for {
-		// Read checksum
-		var checksumBuf [4]byte
-		if _, err := io.ReadFull(reader, checksumBuf[:]); err != nil {
-			break // EOF
+	replayCommit := func() {
+		for _, entry := range entries {
+			if entry.Value == nil {
+				table.Delete(entry.Key)
+			} else {
+				table.Put(entry.Key, entry.Value)
+			}
 		}
-		checksum := binary.BigEndian.Uint32(checksumBuf[:])
+		comittedOffset = offset
+		entries = entries[:0]
+	}
 
-		// Mark start of payload for checksum verification
-		payloadStart := int64(len(data)) - int64(reader.Len())
+	for offset+8 <= len(data) {
+		checksum := binary.BigEndian.Uint32(data[offset : offset+4])
+		keyLen := binary.BigEndian.Uint32(data[offset+4 : offset+8])
+		offset += 8
 
-		// Read key_len
-		var scratch [4]byte
-		if _, err := io.ReadFull(reader, scratch[:]); err != nil {
-			break // truncated
+		if keyLen == commitKeyLen {
+			replayCommit()
+			continue
 		}
-		keyLen := binary.BigEndian.Uint32(scratch[:])
 
-		// Read key
-		if int64(reader.Len()) < int64(keyLen)+4 {
-			break // truncated
+		payloadStart := offset - 4 // keyLen is part of the payload
+
+		if offset+int(keyLen) > len(data) {
+			break
 		}
-		key := make([]byte, keyLen)
-		if _, err := io.ReadFull(reader, key); err != nil {
+		key := data[offset : offset+int(keyLen)]
+		offset += int(keyLen)
+
+		if offset+4 > len(data) {
+			break
+		}
+		valueLen := binary.BigEndian.Uint32(data[offset : offset+4])
+		offset += 4
+
+		var value []byte
+		var payloadEnd int
+
+		if valueLen == walTombstone {
+			value = nil
+		} else {
+			if offset+int(valueLen) > len(data) {
+				break
+			}
+			value = data[offset : offset+int(valueLen)]
+			offset += int(valueLen)
+		}
+		payloadEnd = offset
+
+		if crc32.ChecksumIEEE(data[payloadStart:payloadEnd]) != checksum {
 			break
 		}
 
-		// Read value_len
-		if _, err := io.ReadFull(reader, scratch[:]); err != nil {
-			break // truncated
-		}
-		valueLen := binary.BigEndian.Uint32(scratch[:])
-
-		// Read value
-		var value []byte
-		if valueLen == walTombstone {
-			// tombstone, no value bytes
-		} else {
-			if int64(reader.Len()) < int64(valueLen) {
-				break // truncated
-			}
-			value = make([]byte, valueLen)
-			if _, err := io.ReadFull(reader, value); err != nil {
-				break
-			}
-		}
-
-		// Verify checksum over the payload
-		payloadEnd := int64(len(data)) - int64(reader.Len())
-		payload := data[payloadStart:payloadEnd]
-		if crc32.ChecksumIEEE(payload) != checksum {
-			break // corrupt frame
-		}
-
-		if valueLen == walTombstone {
-			table.Delete(key)
-		} else {
-			table.Put(key, value)
-		}
-
-		lastGoodOffset = payloadEnd
+		entries = append(entries, KeyValue{key, value})
 	}
 
-	// Truncate to last good frame to clean up any partial write
-	if lastGoodOffset < int64(len(data)) {
-		os.Truncate(wal.path, lastGoodOffset)
+	if comittedOffset < len(data) {
+		log.Printf("WAL was correupted. Dropped %d bytes", len(data)-comittedOffset)
 	}
 
 	return nil

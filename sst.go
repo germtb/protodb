@@ -190,9 +190,9 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 		}
 
 		// Footer: rootOffset(u16) + entryCount(u16) + crc32(u32)
-		binary.Write(&block, binary.BigEndian, inBlockOffsets[root])
-		binary.Write(&block, binary.BigEndian, uint16(inBlockEntries))
-		binary.Write(&block, binary.BigEndian, crc32.ChecksumIEEE(block.Bytes()))
+		writeU16(&block, inBlockOffsets[root])
+		writeU16(&block, uint16(inBlockEntries))
+		writeU32(&block, crc32.ChecksumIEEE(block.Bytes()))
 
 		compressed := snappy.Encode(nil, block.Bytes())
 
@@ -218,10 +218,10 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 		// Write variable-length block index
 		blockIndexStart := buffer.Len()
 		for _, blockIndex := range blocks {
-			binary.Write(&buffer, binary.BigEndian, uint32(len(blockIndex.FirstKey)))
+			writeU32(&buffer, uint32(len(blockIndex.FirstKey)))
 			buffer.Write(blockIndex.FirstKey)
-			binary.Write(&buffer, binary.BigEndian, blockIndex.Offset)
-			binary.Write(&buffer, binary.BigEndian, blockIndex.Length)
+			writeU64(&buffer, blockIndex.Offset)
+			writeU32(&buffer, blockIndex.Length)
 		}
 		blockIndexSize := uint64(buffer.Len() - blockIndexStart)
 
@@ -231,9 +231,9 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 			Version:        Version,
 		}
 
-		binary.Write(&buffer, binary.BigEndian, footer.BlockIndexSize)
-		binary.Write(&buffer, binary.BigEndian, footer.BlockCount)
-		binary.Write(&buffer, binary.BigEndian, footer.Version)
+		writeU64(&buffer, footer.BlockIndexSize)
+		writeU64(&buffer, footer.BlockCount)
+		writeU16(&buffer, footer.Version)
 
 		// Hash the complete SST content
 		sha := sha256.Sum256(buffer.Bytes())
@@ -317,17 +317,17 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 
 		// Write entry: key_len(u32) | key | value_len(u32) | value | left(u16) | right(u16)
 		inBlockOffsets[inBlockEntries] = uint16(block.Len())
-		binary.Write(&block, binary.BigEndian, uint32(len(key)))
+		writeU32(&block, uint32(len(key)))
 		block.Write(key)
 		if value == nil {
-			binary.Write(&block, binary.BigEndian, tombstone)
+			writeU32(&block, tombstone)
 		} else {
-			binary.Write(&block, binary.BigEndian, uint32(len(value)))
+			writeU32(&block, uint32(len(value)))
 		}
 		if value != nil {
 			block.Write(value)
 		}
-		binary.Write(&block, binary.BigEndian, uint32(0xFFFFFFFF)) // left(u16) + right(u16), patched by finishBlock
+		writeU32(&block, 0xFFFFFFFF) // left(u16) + right(u16), patched by finishBlock
 
 		inBlockEntries += 1
 	}

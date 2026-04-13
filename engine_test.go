@@ -5256,6 +5256,8 @@ func TestCrashAfterManifestSaveBeforeWALClear(t *testing.T) {
 	}
 	var walBuf bytes.Buffer
 	writeFrame(&walBuf, key(1), []byte("wal-replay-value"))
+	binary.Write(&walBuf, binary.BigEndian, uint32(0))
+	binary.Write(&walBuf, binary.BigEndian, commitKeyLen)
 	walFile.Write(walBuf.Bytes())
 	walFile.Close()
 

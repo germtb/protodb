@@ -216,9 +216,9 @@ func TestWALReplayBadChecksum(t *testing.T) {
 	wal.Close()
 
 	data, _ := os.ReadFile(walPath)
-	// Corrupt the checksum of the second frame
-	// First frame: 4 (crc) + 4 (key_len) + 8 (key) + 4 (value_len) + 4 (value "good") = 24
-	data[24+1] ^= 0xFF
+	// Layout: [frame1 24B][commit 8B][frame2 starts at 32]
+	// Corrupt a byte inside frame2's CRC (offset 32..35).
+	data[33] ^= 0xFF
 	os.WriteFile(walPath, data, 0644)
 
 	table := newMemtable()
@@ -282,7 +282,7 @@ func TestWALReplayGarbage(t *testing.T) {
 	// We just verify it doesn't panic.
 }
 
-func TestWALReplayTruncatesToLastGood(t *testing.T) {
+func TestWALReplayIgnoresTrailingGarbage(t *testing.T) {
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal")
 
@@ -290,20 +290,18 @@ func TestWALReplayTruncatesToLastGood(t *testing.T) {
 	wal.Append(walKey(1), []byte("good"))
 	wal.Close()
 
-	beforeSize := fileSize(t, walPath)
-
 	// Append garbage after the valid frame
 	f, _ := os.OpenFile(walPath, os.O_APPEND|os.O_WRONLY, 0644)
-	f.Write([]byte("this is garbage that should be truncated"))
+	f.Write([]byte("this is garbage that should be ignored"))
 	f.Close()
 
 	table := newMemtable()
 	wal2, _ := newWAL(walPath)
 	wal2.replay(table)
 
-	afterSize := fileSize(t, walPath)
-	if afterSize != beforeSize {
-		t.Errorf("WAL should be truncated to %d bytes, got %d", beforeSize, afterSize)
+	got, _ := table.Get(walKey(1))
+	if string(got) != "good" {
+		t.Errorf("expected 'good', got %q", got)
 	}
 }
 
@@ -487,4 +485,127 @@ func fileSize(t *testing.T, path string) int64 {
 		t.Fatal(err)
 	}
 	return info.Size()
+}
+
+// TestWALPartialTransaction verifies WAL atomicity: a multi-entry
+// transaction whose tail is torn by a crash must NOT replay as a partial
+// prefix. After the fix, replay either applies the whole batch or none of
+// it.
+//
+// Repro: write 5 keys in one Transaction.Apply(), close, truncate the
+// last 5 bytes of the WAL file, reopen, assert all 5 present OR 0 present
+// (never 4).
+func TestWALPartialTransaction(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx := engine.Transaction()
+	for i := uint64(1); i <= 5; i++ {
+		tx.Put(walKey(i), []byte("value"))
+	}
+	if err := tx.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Truncate the last 5 bytes of the WAL — simulates a torn write at the
+	// tail of a multi-frame batch.
+	walPath := filepath.Join(dir, "protodb", "wal")
+	info, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(walPath, info.Size()-5); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen — WAL replay must give all-or-nothing.
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	present := 0
+	for i := uint64(1); i <= 5; i++ {
+		v, err := engine.Get(walKey(i))
+		if err != nil {
+			t.Fatalf("Get(%d): %v", i, err)
+		}
+		if v != nil {
+			present++
+		}
+	}
+
+	if present != 0 && present != 5 {
+		t.Fatalf("WAL atomicity violated: %d of 5 keys present after torn write (expected 0 or 5)", present)
+	}
+}
+
+// TestWALBatchMidCorruption corrupts a Middle frame of a 5-entry batch
+// and asserts no entries from that batch survive replay.
+func TestWALBatchMidCorruption(t *testing.T) {
+	dir := t.TempDir()
+
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx := engine.Transaction()
+	for i := uint64(1); i <= 5; i++ {
+		tx.Put(walKey(i), []byte("value"))
+	}
+	if err := tx.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	walPath := filepath.Join(dir, "protodb", "wal")
+	data, err := os.ReadFile(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each frame: 4 (crc) + 4 (key_len) + 8 (key) + 4 (value_len) + 5 (value) = 25 bytes.
+	// Plus a 4-byte commit marker at the end of the batch.
+	const frameSize = 25
+	if len(data) < 5*frameSize+4 {
+		t.Fatalf("unexpected WAL size %d", len(data))
+	}
+	// Flip a byte mid-payload of frame index 2 (third frame) so the CRC
+	// fails on it.
+	corruptOffset := 2*frameSize + 10
+	data[corruptOffset] ^= 0xFF
+	if err := os.WriteFile(walPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	present := 0
+	for i := uint64(1); i <= 5; i++ {
+		v, err := engine.Get(walKey(i))
+		if err != nil {
+			t.Fatalf("Get(%d): %v", i, err)
+		}
+		if v != nil {
+			present++
+		}
+	}
+
+	if present != 0 {
+		t.Fatalf("expected 0 keys after mid-batch corruption (all-or-nothing), got %d", present)
+	}
 }
