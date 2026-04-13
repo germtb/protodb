@@ -2,6 +2,7 @@ package protodb
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -633,11 +634,63 @@ func (e *Engine) compactLocked() error {
 		return err
 	}
 
-	return nil
+	return e.gcLocked()
 }
 
 func (e *Engine) CloudSync() error {
 	// TODO
+	return nil
+}
+
+// isSSTHash reports whether name is a 64-char lowercase hex string — the
+// canonical SST filename format produced by WriteSST. This filter keeps GC
+// from touching in-flight "-temp-XYZ" files created by os.CreateTemp.
+func isSSTHash(name string) bool {
+	if len(name) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(name)
+	return err == nil
+}
+
+// gcLocked removes SST files in ObjectsPath() that are not referenced by
+// either level's manifest. Caller must hold compactionMutex and flushMutex.
+func (e *Engine) gcLocked() error {
+	referenced := make(map[string]struct{}, len(e.l0.manifest.hashes)+len(e.l1.manifest.hashes))
+	for _, h := range e.l0.manifest.hashes {
+		referenced[h] = struct{}{}
+	}
+	for _, h := range e.l1.manifest.hashes {
+		referenced[h] = struct{}{}
+	}
+
+	dirEntries, err := os.ReadDir(e.ObjectsPath())
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range dirEntries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !isSSTHash(name) {
+			continue
+		}
+		if _, ok := referenced[name]; ok {
+			continue
+		}
+
+		// POSIX unlink keeps open fds valid, so active Scan iterators that
+		// already hold a handle to this file continue to read successfully.
+		// The fileTable's LRU entry is left to age out naturally — nothing
+		// will look this path up again since it's out of all manifests.
+		fullPath := filepath.Join(e.ObjectsPath(), name)
+		err := os.Remove(fullPath)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
 	return nil
 }
 

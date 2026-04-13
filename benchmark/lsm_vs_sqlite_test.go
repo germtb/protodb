@@ -2,6 +2,7 @@ package benchmark
 
 import (
 	"bytes"
+	"crypto/rand"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
@@ -825,9 +826,8 @@ func TestCompactionOverTime(t *testing.T) {
 		CompactionThreshold: 1000,              // effectively disable auto-compact
 	})
 
-	val := make([]byte, 100) // 100-byte values
-	const batchSize = 10000  // entries per flush (~1.2MB per batch)
-	const rounds = 430       // ~500 MB final
+	const batchSize = 10000 // entries per flush (~1.2MB per batch)
+	const rounds = 80       // enough to cross the 64MB SST split once or twice
 
 	t.Logf("%-8s  %-12s  %-12s  %-10s  %-10s", "Round", "L1 SSTs", "L1 Size", "Compact ms", "Get ns")
 
@@ -835,6 +835,11 @@ func TestCompactionOverTime(t *testing.T) {
 		// Write a batch of entries with keys spread across the full range.
 		// Use round*batchSize offset so data accumulates over time.
 		for i := 0; i < batchSize; i++ {
+			// Fresh buffer per Put — engine stores the slice by reference, so
+			// reusing one `val` across the batch would make snappy compress L1
+			// to nothing.
+			val := make([]byte, 100)
+			rand.Read(val)
 			k := uint64(round*batchSize + i)
 			engine.Put(uint64Key(k), val)
 		}

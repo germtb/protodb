@@ -5846,3 +5846,95 @@ func TestAggressiveAutoCompaction(t *testing.T) {
 		}
 	}
 }
+
+// countOrphans returns the number of 64-char-hex files in objects/ that are
+// not referenced by either manifest.
+func countOrphans(t *testing.T, engine *Engine) int {
+	t.Helper()
+	referenced := make(map[string]struct{})
+	for _, h := range engine.l0.manifest.hashes {
+		referenced[h] = struct{}{}
+	}
+	for _, h := range engine.l1.manifest.hashes {
+		referenced[h] = struct{}{}
+	}
+	entries, err := os.ReadDir(engine.ObjectsPath())
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	orphans := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !isSSTHash(entry.Name()) {
+			continue
+		}
+		if _, ok := referenced[entry.Name()]; !ok {
+			orphans++
+		}
+	}
+	return orphans
+}
+
+func countHashFiles(t *testing.T, engine *Engine) int {
+	t.Helper()
+	entries, err := os.ReadDir(engine.ObjectsPath())
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	n := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && isSSTHash(entry.Name()) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCompactCleansUpOrphans verifies that each compaction unlinks the SST
+// files it superseded, so the objects/ directory never accumulates unreferenced
+// files across repeated write+compact cycles.
+func TestCompactCleansUpOrphans(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	engine.SetPolicy(&Policy{CompactionThreshold: 1, FlushThreshold: 1024 * 1024 * 64})
+
+	const keysPerCycle = 50
+	const cycles = 4
+
+	// Overwrite the same key space each cycle so every compaction rewrites L1
+	// and produces orphans — which compaction is now expected to clean up.
+	for c := 0; c < cycles; c++ {
+		for i := 0; i < keysPerCycle; i++ {
+			value := []byte(fmt.Sprintf("cycle-%d-key-%d", c, i))
+			if err := engine.Put(key(uint64(i)), value); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+		}
+		if err := engine.Flush(); err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+		if err := engine.Compact(); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+
+		if got := countOrphans(t, engine); got != 0 {
+			t.Fatalf("cycle %d: %d orphan SSTs after Compact, want 0", c, got)
+		}
+	}
+
+	// Final state: only manifest-referenced files remain, engine still reads.
+	for i := 0; i < keysPerCycle; i++ {
+		expected := fmt.Sprintf("cycle-%d-key-%d", cycles-1, i)
+		got, err := engine.Get(key(uint64(i)))
+		if err != nil {
+			t.Fatalf("Get(%d): %v", i, err)
+		}
+		if string(got) != expected {
+			t.Fatalf("Get(%d) = %q, want %q", i, got, expected)
+		}
+	}
+}
