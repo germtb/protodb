@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 )
@@ -80,7 +81,7 @@ func Open(path string) (*Engine, error) {
 	}
 
 	memtable := newMemtable()
-	err = wal.replay(memtable)
+	_, err = wal.replay(memtable)
 
 	if err != nil {
 		return nil, err
@@ -517,13 +518,12 @@ func (e *Engine) flushLocked() error {
 		return err
 	}
 
-	var newHashes []string
-	for _, sst := range new_ssts {
-		newHashes = append(newHashes, sst.hash)
+	newHashes := e.l0.manifest.hashes[:]
+	for _, s := range new_ssts {
+		newHashes = slices.Insert(newHashes, 0, s.hash)
 	}
-	e.l0.manifest.Prepend(newHashes)
 
-	err = e.l0.manifest.Save()
+	err = e.l0.manifest.Update(newHashes)
 	if err != nil {
 		return err
 	}
@@ -615,24 +615,22 @@ func (e *Engine) compactLocked() error {
 	e.flushMutex.Lock()
 	defer e.flushMutex.Unlock()
 
-	e.l1.manifest.Clear()
-	for _, sst := range new_ssts {
-		e.l1.manifest.Append(sst.hash)
+	new_l1_ssts := make([]string, len(new_ssts))
+	for i, sst := range new_ssts {
+		new_l1_ssts[i] = sst.hash
 	}
-
-	err := e.l1.manifest.Save()
+	err := e.l1.manifest.Update(new_l1_ssts)
 	if err != nil {
 		return err
 	}
 
 	e.l1.ssts = new_ssts
 
-	e.l0.ssts = e.l0.ssts[:len(e.l0.ssts)-len(l0ssts)]
-	e.l0.manifest.TrimEnd(len(l0ssts))
-	err = e.l0.manifest.Save()
+	err = e.l0.manifest.TrimEnd(len(l0ssts))
 	if err != nil {
 		return err
 	}
+	e.l0.ssts = e.l0.ssts[:len(e.l0.ssts)-len(l0ssts)]
 
 	return e.gcLocked()
 }

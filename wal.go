@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"hash/crc32"
-	"log"
 	"os"
 )
 
@@ -230,13 +229,13 @@ func (wal *WAL) Drop() error {
 	return wal.handle.Close()
 }
 
-func (wal *WAL) replay(table *memtable) error {
+func (wal *WAL) replay(table *memtable) (int, error) {
 	data, err := os.ReadFile(wal.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return 0, nil
 		}
-		return err
+		return 0, err
 	}
 
 	entries := make([]KeyValue, 0)
@@ -300,9 +299,5 @@ func (wal *WAL) replay(table *memtable) error {
 		entries = append(entries, KeyValue{key, value})
 	}
 
-	if comittedOffset < len(data) {
-		log.Printf("WAL was corrupted. Dropped %d bytes", len(data)-comittedOffset)
-	}
-
-	return nil
+	return len(data) - comittedOffset, nil
 }

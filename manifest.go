@@ -30,27 +30,16 @@ func newManifest(path string) (*Manifest, error) {
 }
 
 func (m *Manifest) Hashes() []string {
-	return m.hashes
+	return m.hashes[:]
 }
 
-func (m *Manifest) Append(hash string) {
-	m.hashes = append(m.hashes, hash)
+func (m *Manifest) TrimEnd(l int) error {
+	new_hashes := m.hashes[:len(m.hashes)-l]
+	return m.Update(new_hashes)
 }
 
-func (m *Manifest) Prepend(hashes []string) {
-	m.hashes = append(hashes, m.hashes...)
-}
-
-func (m *Manifest) Clear() {
-	m.hashes = make([]string, 0)
-}
-
-func (m *Manifest) TrimEnd(l int) {
-	m.hashes = m.hashes[:len(m.hashes)-l]
-}
-
-func (m *Manifest) Save() error {
-	content := strings.Join(m.hashes, "\n") + "\n"
+func (m *Manifest) Update(hashes []string) error {
+	content := strings.Join(hashes, "\n") + "\n"
 
 	dir := filepath.Dir(m.path)
 	tempfile, err := os.CreateTemp(dir, ".manifest-temp-")
@@ -71,5 +60,28 @@ func (m *Manifest) Save() error {
 	}
 
 	tempfile.Close()
-	return os.Rename(tempfile.Name(), m.path)
+	err = os.Rename(tempfile.Name(), m.path)
+	if err != nil {
+		return err
+	}
+	if err := syncDir(dir); err != nil {
+		return err
+	}
+	m.hashes = hashes
+	return nil
+}
+
+// syncDir fsyncs a directory so a preceding Rename is durable. Without it,
+// a crash right after Rename can leave the directory entry unpersisted and
+// the renamed file disappears on reboot.
+func syncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		dir.Close()
+		return err
+	}
+	return dir.Close()
 }

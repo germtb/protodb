@@ -263,6 +263,9 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 		if err != nil {
 			return err
 		}
+		if err := syncDir(path); err != nil {
+			return err
+		}
 
 		ssts = append(ssts, &sst{
 			cache:    newLRU[uint64, sstBlock](128, nil),
