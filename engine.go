@@ -22,7 +22,7 @@ type Policy struct {
 type Engine struct {
 	flushMutex      sync.RWMutex
 	compactionMutex sync.RWMutex
-	memtable        memtable
+	memtable        *memtable
 	path            string
 	fileTable       *FileTable
 	wal             *WAL
@@ -79,7 +79,7 @@ func Open(path string) (*Engine, error) {
 	}
 
 	memtable := newMemtable()
-	err = wal.replay(&memtable)
+	err = wal.replay(memtable)
 
 	if err != nil {
 		return nil, err
@@ -106,6 +106,20 @@ func (e *Engine) WALPath() string {
 
 func (e *Engine) ObjectsPath() string {
 	return filepath.Join(e.path, "objects")
+}
+
+func (e *Engine) SetPolicy(policy *Policy) {
+	e.policy = policy
+}
+
+// L1Stats returns the number of SSTs and total byte size of L1.
+func (e *Engine) L1Stats() (sstCount int, totalBytes int64) {
+	e.flushMutex.RLock()
+	defer e.flushMutex.RUnlock()
+	for _, s := range e.l1.ssts {
+		totalBytes += s.fileSize
+	}
+	return len(e.l1.ssts), totalBytes
 }
 
 func (e *Engine) Close() error {
@@ -425,20 +439,21 @@ func (it *mergeIterator) Value() []byte {
 func (e *Engine) Scan(lo, hi Key) Iterator {
 	// Clone mutates COW flags, so it needs an exclusive lock. It's O(1).
 	e.flushMutex.Lock()
-	snapshot := e.memtable.Clone()
+	memtable := e.memtable.Clone()
 	l0ssts := make([]*sst, len(e.l0.ssts))
 	l1ssts := make([]*sst, len(e.l1.ssts))
 	copy(l0ssts, e.l0.ssts)
 	copy(l1ssts, e.l1.ssts)
 	e.flushMutex.Unlock()
 
-	return e.scan(lo, hi, snapshot.Scan(lo, hi), l0ssts, l1ssts)
+	return e.scan(lo, hi, memtable, l0ssts, l1ssts)
 }
 
-func (e *Engine) scan(lo, hi Key, memSource Iterator, l0ssts []*sst, l1ssts []*sst) Iterator {
+func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts []*sst) Iterator {
 	var sources []Iterator
-	if memSource != nil {
-		sources = []Iterator{memSource}
+
+	if memtable != nil && memtable.Len() > 0 {
+		sources = []Iterator{memtable.Scan(lo, hi)}
 	}
 
 	for _, s := range l0ssts {
@@ -451,7 +466,13 @@ func (e *Engine) scan(lo, hi Key, memSource Iterator, l0ssts []*sst, l1ssts []*s
 
 	// L1 SSTs are non-overlapping and sorted, so we walk them as a single
 	// concatenated source instead of pushing each into the merge heap.
-	if len(l1ssts) > 0 {
+	if len(l1ssts) == 1 {
+		handle, err := e.fileTable.getOrOpen(l1ssts[0].path)
+		if err != nil {
+			return newMergeIterator(sources)
+		}
+		sources = append(sources, l1ssts[0].Iterator(lo, hi, handle))
+	} else if len(l1ssts) > 1 {
 		opener := func(s *sst) (reader, error) {
 			return e.fileTable.getOrOpen(s.path)
 		}

@@ -4752,9 +4752,9 @@ func TestSSTWithValidFooterButCorruptedBlockIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The footer is the last footerSize bytes.
+	// The footer is the last sstFooterSize bytes.
 	// Read the block index size from the footer (first 8 bytes of footer).
-	footerStart := len(data) - int(footerSize)
+	footerStart := len(data) - int(sstFooterSize)
 	blockIdxSize := binary.BigEndian.Uint64(data[footerStart : footerStart+8])
 	blockIndexStart := footerStart - int(blockIdxSize)
 	if blockIndexStart < 0 {

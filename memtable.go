@@ -16,8 +16,8 @@ type memtable struct {
 	byteSize uint64
 }
 
-func newMemtable() memtable {
-	return memtable{
+func newMemtable() *memtable {
+	return &memtable{
 		tree: btree.NewG(32, func(a, b mementry) bool {
 			return bytes.Compare(a.key, b.key) < 0
 		}),
@@ -25,8 +25,8 @@ func newMemtable() memtable {
 	}
 }
 
-func (m *memtable) Clone() memtable {
-	return memtable{
+func (m *memtable) Clone() *memtable {
+	return &memtable{
 		tree:     m.tree.Clone(),
 		byteSize: m.byteSize,
 	}
