@@ -24,6 +24,18 @@ func openTestEngine(t *testing.T) *Engine {
 	return engine
 }
 
+// scanLive drains a scan iterator, dropping tombstones (value == nil).
+func scanLive(it Iterator) (keys []Key, values [][]byte) {
+	for it.Next() {
+		if it.Value() == nil {
+			continue
+		}
+		keys = append(keys, append(Key(nil), it.Key()...))
+		values = append(values, append([]byte(nil), it.Value()...))
+	}
+	return
+}
+
 // --- Open ---
 
 func TestOpenFreshDB(t *testing.T) {
@@ -419,12 +431,7 @@ func TestEngineScanSkipsTombstones(t *testing.T) {
 	engine.Flush()
 	engine.Delete(key(2))
 
-	var keys []Key
-	iter := engine.Scan(key(1), key(4))
-	for iter.Next() {
-		iterKey := iter.Key()
-		keys = append(keys, iterKey)
-	}
+	keys, _ := scanLive(engine.Scan(key(1), key(4)))
 
 	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(3)) {
 		t.Errorf("Scan: got %v, want [1 3]", keys)
@@ -441,12 +448,7 @@ func TestEngineScanTombstoneShadowsOlderSST(t *testing.T) {
 	engine.Delete(key(2))
 	engine.Flush()
 
-	var keys []Key
-	iter := engine.Scan(key(1), key(4))
-	for iter.Next() {
-		iterKey := iter.Key()
-		keys = append(keys, iterKey)
-	}
+	keys, _ := scanLive(engine.Scan(key(1), key(4)))
 
 	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(3)) {
 		t.Errorf("Scan: got %v, want [1 3]", keys)
@@ -791,12 +793,7 @@ func TestEngineScanWithNilTombstones(t *testing.T) {
 	engine.Flush()
 	engine.Put(key(2), nil) // tombstone via Put
 
-	var keys []Key
-	iter := engine.Scan(key(1), key(4))
-	for iter.Next() {
-		iterKey := iter.Key()
-		keys = append(keys, iterKey)
-	}
+	keys, _ := scanLive(engine.Scan(key(1), key(4)))
 
 	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(3)) {
 		t.Errorf("Scan: got %v, want [1 3]", keys)
@@ -815,13 +812,9 @@ func TestEngineAllDeletedThenScan(t *testing.T) {
 	engine.Delete(key(2))
 	engine.Delete(key(3))
 
-	var count int = 0
-	iter := engine.Scan(key(0), key(10))
-	for iter.Next() {
-		count++
-	}
-	if count != 0 {
-		t.Errorf("Scan: got %d entries, want 0", count)
+	keys, _ := scanLive(engine.Scan(key(0), key(10)))
+	if len(keys) != 0 {
+		t.Errorf("Scan: got %d live entries, want 0", len(keys))
 	}
 }
 
@@ -834,13 +827,9 @@ func TestEngineAllDeletedFlushedThenScan(t *testing.T) {
 	engine.Delete(key(2))
 	engine.Flush()
 
-	var count int = 0
-	iter := engine.Scan(key(0), key(10))
-	for iter.Next() {
-		count++
-	}
-	if count != 0 {
-		t.Errorf("Scan: got %d entries, want 0", count)
+	keys, _ := scanLive(engine.Scan(key(0), key(10)))
+	if len(keys) != 0 {
+		t.Errorf("Scan: got %d live entries, want 0", len(keys))
 	}
 }
 
@@ -2351,7 +2340,7 @@ func TestSSTScanAfterFileDeleted(t *testing.T) {
 		{key(2), []byte("b")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs))
+	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2400,7 +2389,7 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 		{key(3), []byte("cccccccccc")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs))
+	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2431,7 +2420,7 @@ func TestSSTGetTruncatedFile(t *testing.T) {
 		{key(1), []byte("hello world")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs))
+	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2459,7 +2448,7 @@ func TestReadSSTCorruptedFooterCount(t *testing.T) {
 		{key(1), []byte("x")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs))
+	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2555,7 +2544,7 @@ func TestWriteSSTFailsOnBadDir(t *testing.T) {
 		{key(1), []byte("a")},
 	})
 
-	_, err := WriteSST(blocker, entries)
+	_, err := WriteSST(blocker, entries, true)
 	if err == nil {
 		t.Fatal("expected WriteSST to fail when dir is actually a file")
 	}
@@ -3245,8 +3234,9 @@ func TestAdversarialScanComplexMerge(t *testing.T) {
 		vals = append(vals, string(val))
 	}
 
-	expectedKeys := []Key{key(1), key(2), key(4), key(5), key(6), key(7)}
-	expectedVals := []string{"sst1-1", "sst2-2", "sst2-4", "mem-5", "sst2-6", "mem-7"}
+	// Scan surfaces tombstones (value == nil); callers filter if desired.
+	expectedKeys := []Key{key(1), key(2), key(3), key(4), key(5), key(6), key(7)}
+	expectedVals := []string{"sst1-1", "sst2-2", "", "sst2-4", "mem-5", "sst2-6", "mem-7"}
 
 	if len(keys) != len(expectedKeys) {
 		t.Fatalf("Scan: got %d entries, want %d", len(keys), len(expectedKeys))

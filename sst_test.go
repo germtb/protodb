@@ -16,7 +16,7 @@ func entriesFrom(entries []KeyValue) *sliceIterator {
 func writeTestSST(t *testing.T, pairs []KeyValue) (*sst, string) {
 	t.Helper()
 	dir := t.TempDir()
-	ssts, err := WriteSST(dir, entriesFrom(pairs))
+	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		{key(3), []byte("foo")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs))
+	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestEmptySST(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []KeyValue{}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs))
+	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestCustomTailSize(t *testing.T) {
 		{key(3), []byte("ccc")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs))
+	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestWriteUnsortedKeysError(t *testing.T) {
 		{key(3), []byte("c")},
 		{key(1), []byte("a")},
 	}
-	_, err := WriteSST(dir, entriesFrom(pairs))
+	_, err := WriteSST(dir, entriesFrom(pairs), true)
 	if !errors.Is(err, ErrUnsortedKeys) {
 		t.Fatalf("expected ErrUnsortedKeys, got %v", err)
 	}
@@ -256,7 +256,7 @@ func TestWriteDuplicateKeysError(t *testing.T) {
 		{key(1), []byte("a")},
 		{key(1), []byte("b")},
 	}
-	_, err := WriteSST(dir, entriesFrom(pairs))
+	_, err := WriteSST(dir, entriesFrom(pairs), true)
 	if !errors.Is(err, ErrUnsortedKeys) {
 		t.Fatalf("expected ErrUnsortedKeys, got %v", err)
 	}
@@ -283,7 +283,7 @@ func TestReadBadVersionError(t *testing.T) {
 	pairs := []KeyValue{
 		{key(1), []byte("x")},
 	}
-	ssts, err := WriteSST(dir, entriesFrom(pairs))
+	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}

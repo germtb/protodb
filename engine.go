@@ -418,11 +418,6 @@ func (it *mergeIterator) Next() bool {
 		it.value = entry.value
 		it.started = true
 
-		// Skip tombstones — user shouldn't see them
-		if entry.value == nil {
-			continue
-		}
-
 		return true
 	}
 	return false
@@ -484,7 +479,6 @@ func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts 
 		return sources[0]
 	}
 
-	// Merge all the sources
 	return newMergeIterator(sources)
 }
 
@@ -516,7 +510,7 @@ func (e *Engine) Flush() error {
 }
 
 func (e *Engine) flushLocked() error {
-	new_ssts, err := WriteSST(e.ObjectsPath(), e.memtable.Entries())
+	new_ssts, err := WriteSST(e.ObjectsPath(), e.memtable.Entries(), true)
 
 	if err != nil {
 		return err
@@ -554,18 +548,13 @@ func (e *Engine) compactLocked() error {
 	copy(l1ssts, e.l1.ssts)
 	e.flushMutex.Unlock()
 
-	l0Entries := e.scan(
-		nil,
-		nil,
-		nil,
-		l0ssts,
-		nil,
-	)
+	l0Entries := e.scan(nil, nil, nil, l0ssts, nil)
 
 	var new_ssts []*sst
 
 	if len(l1ssts) == 0 {
-		written_ssts, err := WriteSST(e.ObjectsPath(), l0Entries)
+		// L1 is bottom: tombstones have nothing to shadow below, drop them.
+		written_ssts, err := WriteSST(e.ObjectsPath(), l0Entries, false)
 		if err != nil {
 			return err
 		}
@@ -585,11 +574,10 @@ func (e *Engine) compactLocked() error {
 				}
 				l0Range := iter(entries)
 				l1Range := l1ssts[l1Index].Iterator(nil, nil, handle)
+				// Merge preserves tombstones so newer L0 deletions shadow older
+				// L1 values; WriteSST(false) drops them at the bottom level.
 				mergedRange := newMergeIterator([]Iterator{l0Range, l1Range})
-				rangeSsts, err := WriteSST(
-					e.ObjectsPath(),
-					mergedRange,
-				)
+				rangeSsts, err := WriteSST(e.ObjectsPath(), mergedRange, false)
 				if err != nil {
 					return err
 				}

@@ -139,7 +139,10 @@ func readBlockIndex(reader *bytes.Reader) (sstBlockIndex, error) {
 	return sstBlockIndex{FirstKey: key, Offset: offset, Length: length}, nil
 }
 
-func WriteSST(path string, entries Iterator) ([]*sst, error) {
+// writeTombstones controls whether entries with value == nil are serialized.
+// Flushes must write tombstones so deletions shadow older values at lower
+// levels; bottom-level compactions pass false to reclaim space.
+func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, error) {
 	var ssts []*sst
 	var buffer bytes.Buffer
 	buffer.Grow(SSTSize)
@@ -283,6 +286,10 @@ func WriteSST(path string, entries Iterator) ([]*sst, error) {
 	for entries.Next() {
 		key := entries.Key()
 		value := entries.Value()
+
+		if !writeTombstones && value == nil {
+			continue
+		}
 
 		// This is to ensure entries are in sorted order
 		if (len(blocks) > 0 || inBlockEntries > 0) && bytes.Compare(key, lastKey) <= 0 {
