@@ -687,20 +687,25 @@ func (tx *Transaction) Apply() error {
 	defer tx.engine.flushMutex.Unlock()
 
 	batch := tx.engine.wal.Batch()
-
 	for _, entry := range tx.entries {
 		if entry.value == nil {
 			batch.Delete(entry.key)
-			tx.engine.memtable.Delete(entry.key)
 		} else {
 			batch.Put(entry.key, entry.value)
-			tx.engine.memtable.Put(entry.key, entry.value)
 		}
 	}
-
 	err := batch.Commit()
 	if err != nil {
 		return err
+	}
+
+	// WAL is durable — only now is it safe to make the writes visible.
+	for _, entry := range tx.entries {
+		if entry.value == nil {
+			tx.engine.memtable.Delete(entry.key)
+		} else {
+			tx.engine.memtable.Put(entry.key, entry.value)
+		}
 	}
 
 	return tx.engine.maybeFlushLocked()
