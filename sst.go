@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/golang/snappy"
 )
 
 var (
@@ -189,14 +191,16 @@ func WriteSST(path string, entries Iterator) ([]*sst, error) {
 		binary.Write(&block, binary.BigEndian, uint16(inBlockEntries))
 		binary.Write(&block, binary.BigEndian, crc32.ChecksumIEEE(block.Bytes()))
 
+		compressed := snappy.Encode(nil, block.Bytes())
+
 		blocks = append(blocks, sstBlockIndex{
 			FirstKey: firstKey,
 			Offset:   offset,
-			Length:   uint32(block.Len()),
+			Length:   uint32(len(compressed)),
 		})
 
-		buffer.Write(block.Bytes())
-		offset += uint64(block.Len())
+		buffer.Write(compressed)
+		offset += uint64(len(compressed))
 		inBlockEntries = 0
 
 		block = bytes.Buffer{}
@@ -412,8 +416,13 @@ func (s *sst) GetBlock(blockIndex uint64, reader reader) (*sstBlock, error) {
 	}
 
 	block := s.blocks[blockIndex]
-	data := make([]byte, block.Length)
-	_, err := reader.ReadAt(data, int64(block.Offset))
+	compressed := make([]byte, block.Length)
+	_, err := reader.ReadAt(compressed, int64(block.Offset))
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := snappy.Decode(nil, compressed)
 
 	if err != nil {
 		return nil, err

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -1066,4 +1067,84 @@ func TestMemoryFootprint(t *testing.T) {
 	pebbleHeap := measure() - before
 	t.Logf("Pebble: %d KB heap (%d entries)", pebbleHeap/1024, entryCount)
 	db.Close()
+}
+
+func TestCompressionRatio(t *testing.T) {
+	val := make([]byte, 100)
+	for i := range val {
+		val[i] = byte(i % 26 + 'a') // compressible: repeating lowercase letters
+	}
+
+	dir := t.TempDir()
+	engine, _ := protodb.Open(dir)
+	engine.SetPolicy(&protodb.Policy{
+		FlushThreshold:      1024 * 1024 * 64,
+		CompactionThreshold: 1000,
+	})
+
+	const entries = 100_000
+	for i := 0; i < entries; i++ {
+		engine.Put(uint64Key(uint64(i)), val)
+	}
+	engine.Flush()
+	engine.Compact()
+	engine.Close()
+
+	// Measure total size of protodb directory
+	var totalSize int64
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			totalSize += info.Size()
+		}
+		return nil
+	})
+
+	rawSize := int64(entries) * int64(8+100+12) // key + value + entry overhead
+	t.Logf("Entries:     %d", entries)
+	t.Logf("Raw data:    %s", formatBytes(rawSize))
+	t.Logf("On disk:     %s", formatBytes(totalSize))
+	t.Logf("Ratio:       %.2fx", float64(rawSize)/float64(totalSize))
+}
+
+func TestCompressionRatioRandom(t *testing.T) {
+	rng := bytes.NewReader(nil) // placeholder
+	_ = rng
+	val := make([]byte, 100)
+	// Fill with pseudo-random bytes (incompressible)
+	for i := range val {
+		val[i] = byte((i*7 + 13) % 256)
+	}
+
+	dir := t.TempDir()
+	engine, _ := protodb.Open(dir)
+	engine.SetPolicy(&protodb.Policy{
+		FlushThreshold:      1024 * 1024 * 64,
+		CompactionThreshold: 1000,
+	})
+
+	const entries = 100_000
+	for i := 0; i < entries; i++ {
+		// Vary the value slightly per entry to prevent cross-entry compression
+		val[0] = byte(i)
+		val[1] = byte(i >> 8)
+		val[2] = byte(i >> 16)
+		engine.Put(uint64Key(uint64(i)), val)
+	}
+	engine.Flush()
+	engine.Compact()
+	engine.Close()
+
+	var totalSize int64
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			totalSize += info.Size()
+		}
+		return nil
+	})
+
+	rawSize := int64(entries) * int64(8+100+12)
+	t.Logf("Entries:     %d (pseudo-random values)", entries)
+	t.Logf("Raw data:    %s", formatBytes(rawSize))
+	t.Logf("On disk:     %s", formatBytes(totalSize))
+	t.Logf("Ratio:       %.2fx", float64(rawSize)/float64(totalSize))
 }
