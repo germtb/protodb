@@ -546,28 +546,6 @@ func (e *Engine) Compact() error {
 	return e.compactLocked()
 }
 
-type KeyValue struct {
-	Key   Key
-	Value []byte
-}
-
-type sliceIterator struct {
-	entries []KeyValue
-	index   int
-}
-
-func iter(slice []KeyValue) *sliceIterator {
-	return &sliceIterator{entries: slice, index: -1}
-}
-
-func (it *sliceIterator) Next() bool {
-	it.index++
-	return it.index < len(it.entries)
-}
-
-func (it *sliceIterator) Key() Key     { return it.entries[it.index].Key }
-func (it *sliceIterator) Value() []byte { return it.entries[it.index].Value }
-
 func (e *Engine) compactLocked() error {
 	e.flushMutex.Lock()
 	l0ssts := make([]*sst, len(e.l0.ssts))

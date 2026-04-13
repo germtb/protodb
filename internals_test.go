@@ -76,13 +76,10 @@ func BenchmarkBytesCompare(b *testing.B) {
 // Direct SST iteration with no merge wrapper.
 func BenchmarkSSTIterate1000(b *testing.B) {
 	dir := b.TempDir()
-	pairs := make([]struct {
-		key   Key
-		value []byte
-	}, 10000)
+	pairs := make([]KeyValue, 10000)
 	for idx := range pairs {
-		pairs[idx].key = key(uint64(idx))
-		pairs[idx].value = []byte("value")
+		pairs[idx].Key = key(uint64(idx))
+		pairs[idx].Value = []byte("value")
 	}
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
 	if err != nil {
@@ -109,13 +106,10 @@ func BenchmarkSSTIterate1000(b *testing.B) {
 
 func BenchmarkSSTGet(b *testing.B) {
 	dir := b.TempDir()
-	pairs := make([]struct {
-		key   Key
-		value []byte
-	}, 10000)
+	pairs := make([]KeyValue, 10000)
 	for idx := range pairs {
-		pairs[idx].key = key(uint64(idx))
-		pairs[idx].value = []byte("value")
+		pairs[idx].Key = key(uint64(idx))
+		pairs[idx].Value = []byte("value")
 	}
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
 	if err != nil {
@@ -140,13 +134,10 @@ func BenchmarkSSTGet(b *testing.B) {
 
 func BenchmarkSSTGetWithKeyAlloc(b *testing.B) {
 	dir := b.TempDir()
-	pairs := make([]struct {
-		key   Key
-		value []byte
-	}, 10000)
+	pairs := make([]KeyValue, 10000)
 	for idx := range pairs {
-		pairs[idx].key = key(uint64(idx))
-		pairs[idx].value = []byte("value")
+		pairs[idx].Key = key(uint64(idx))
+		pairs[idx].Value = []byte("value")
 	}
 	ssts, err := WriteSST(dir, entriesFrom(pairs))
 	if err != nil {

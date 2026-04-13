@@ -2346,10 +2346,7 @@ func TestFlushFailsOnUnwritableDir(t *testing.T) {
 // SST Scan silently handles a deleted SST file (yields no results).
 func TestSSTScanAfterFileDeleted(t *testing.T) {
 	dir := t.TempDir()
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{
+	pairs := []KeyValue{
 		{key(1), []byte("a")},
 		{key(2), []byte("b")},
 	}
@@ -2397,10 +2394,7 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 	dir := t.TempDir()
 
 	// Write an SST with enough data that truncation breaks a read
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{
+	pairs := []KeyValue{
 		{key(1), []byte("aaaaaaaaaa")},
 		{key(2), []byte("bbbbbbbbbb")},
 		{key(3), []byte("cccccccccc")},
@@ -2433,10 +2427,7 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 // SST Get handles a truncated file.
 func TestSSTGetTruncatedFile(t *testing.T) {
 	dir := t.TempDir()
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{
+	pairs := []KeyValue{
 		{key(1), []byte("hello world")},
 	}
 
@@ -2464,10 +2455,7 @@ func TestSSTGetTruncatedFile(t *testing.T) {
 // ReadSST returns ErrCorrupted or panics when footer claims more entries than the file can hold.
 func TestReadSSTCorruptedFooterCount(t *testing.T) {
 	dir := t.TempDir()
-	pairs := []struct {
-		key   Key
-		value []byte
-	}{
+	pairs := []KeyValue{
 		{key(1), []byte("x")},
 	}
 
@@ -2563,10 +2551,7 @@ func TestWriteSSTFailsOnBadDir(t *testing.T) {
 	blocker := filepath.Join(dir, "blocker")
 	os.WriteFile(blocker, []byte("x"), 0644)
 
-	entries := entriesFrom([]struct {
-		key   Key
-		value []byte
-	}{
+	entries := entriesFrom([]KeyValue{
 		{key(1), []byte("a")},
 	})
 
