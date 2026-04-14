@@ -202,7 +202,7 @@ func TestScanRange(t *testing.T) {
 	var keys [][]byte
 	iter := m.Scan(key(2), key(5))
 	for iter.Next() {
-		keys = append(keys, iter.Key())
+		keys = append(keys, iter.Current().Key)
 	}
 
 	if len(keys) != 3 || !bytes.Equal(keys[0], key(2)) || !bytes.Equal(keys[1], key(3)) || !bytes.Equal(keys[2], key(4)) {
@@ -221,8 +221,8 @@ func TestMemtableScanYieldsTombstones(t *testing.T) {
 	var tombstones [][]byte
 	iter := m.Scan(key(1), key(4))
 	for iter.Next() {
-		k := iter.Key()
-		v := iter.Value()
+		k := iter.Current().Key
+		v := iter.Current().Value
 		keys = append(keys, k)
 		if v == nil {
 			tombstones = append(tombstones, k)
@@ -289,7 +289,7 @@ func TestScanBoundaries(t *testing.T) {
 	var keys [][]byte
 	iter := m.Scan(key(1), key(3))
 	for iter.Next() {
-		keys = append(keys, iter.Key())
+		keys = append(keys, iter.Current().Key)
 	}
 	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(2)) {
 		t.Errorf("Scan(1, 3): got %v, want [1 2]", keys)
@@ -305,7 +305,7 @@ func TestScanBreak(t *testing.T) {
 	var keys [][]byte
 	iter := m.Scan(key(1), key(4))
 	for iter.Next() {
-		k := iter.Key()
+		k := iter.Current().Key
 		keys = append(keys, k)
 		if bytes.Equal(k, key(2)) {
 			break
@@ -325,7 +325,7 @@ func TestEntriesOrder(t *testing.T) {
 	var keys [][]byte
 	iter := m.Entries()
 	for iter.Next() {
-		keys = append(keys, iter.Key())
+		keys = append(keys, iter.Current().Key)
 	}
 
 	if len(keys) != 3 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(2)) || !bytes.Equal(keys[2], key(3)) {
@@ -344,8 +344,8 @@ func TestEntriesIncludesTombstones(t *testing.T) {
 	var tombstones [][]byte
 	iter := m.Entries()
 	for iter.Next() {
-		k := iter.Key()
-		v := iter.Value()
+		k := iter.Current().Key
+		v := iter.Current().Value
 		keys = append(keys, k)
 		if v == nil {
 			tombstones = append(tombstones, k)
@@ -382,7 +382,7 @@ func TestEntriesBreak(t *testing.T) {
 	var keys [][]byte
 	iter := m.Entries()
 	for iter.Next() {
-		k := iter.Key()
+		k := iter.Current().Key
 		keys = append(keys, k)
 		if bytes.Equal(k, key(2)) {
 			break

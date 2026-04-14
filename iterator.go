@@ -11,9 +11,8 @@ type Iterator interface {
 	// Next advances the iterator. Returns false when exhausted.
 	Next() bool
 	// Key returns the current key. Only valid after Next() returns true.
-	Key() Key
-	// Value returns the current value. Nil means tombstone.
-	Value() []byte
+	Current() KeyValue
+	Close() error
 }
 
 type sliceIterator struct {
@@ -30,5 +29,5 @@ func (it *sliceIterator) Next() bool {
 	return it.index < len(it.entries)
 }
 
-func (it *sliceIterator) Key() Key      { return it.entries[it.index].Key }
-func (it *sliceIterator) Value() []byte { return it.entries[it.index].Value }
+func (it *sliceIterator) Current() KeyValue { return it.entries[it.index] }
+func (it *sliceIterator) Close() error      { return nil }

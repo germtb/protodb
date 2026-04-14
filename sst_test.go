@@ -447,8 +447,8 @@ func TestScanFullRange(t *testing.T) {
 	var vals []string
 	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
-		keys = append(keys, iter.Key())
-		vals = append(vals, string(iter.Value()))
+		keys = append(keys, iter.Current().Key)
+		vals = append(vals, string(iter.Current().Value))
 	}
 
 	if len(keys) != 3 {
@@ -475,7 +475,7 @@ func TestScanSubRange(t *testing.T) {
 	var keys []Key
 	iter := s.Iterator(key(20), key(40), f)
 	for iter.Next() {
-		keys = append(keys, iter.Key())
+		keys = append(keys, iter.Current().Key)
 	}
 
 	if len(keys) != 2 {
@@ -526,7 +526,7 @@ func TestScanSingleEntry(t *testing.T) {
 	var keys []Key
 	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
-		keys = append(keys, iter.Key())
+		keys = append(keys, iter.Current().Key)
 	}
 	if len(keys) != 1 || !bytes.Equal(keys[0], key(42)) {
 		t.Errorf("got %v, want [key(42)]", keys)
@@ -545,7 +545,7 @@ func TestScanExactBoundaries(t *testing.T) {
 	var keys []Key
 	iter := s.Iterator(key(10), key(30), f)
 	for iter.Next() {
-		keys = append(keys, iter.Key())
+		keys = append(keys, iter.Current().Key)
 	}
 	if len(keys) != 2 {
 		t.Fatalf("got %d entries, want 2", len(keys))
@@ -568,7 +568,7 @@ func TestScanBreakEarly(t *testing.T) {
 	var keys []Key
 	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
-		keys = append(keys, iter.Key())
+		keys = append(keys, iter.Current().Key)
 		if len(keys) == 2 {
 			break
 		}
@@ -592,7 +592,7 @@ func TestScanEmptyValues(t *testing.T) {
 	var vals []string
 	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
-		vals = append(vals, string(iter.Value()))
+		vals = append(vals, string(iter.Current().Value))
 	}
 	if len(vals) != 3 {
 		t.Fatalf("got %d entries, want 3", len(vals))
@@ -612,7 +612,7 @@ func TestScanLastEntry(t *testing.T) {
 	var vals []string
 	iter := s.Iterator(key(20), key(100), f)
 	for iter.Next() {
-		vals = append(vals, string(iter.Value()))
+		vals = append(vals, string(iter.Current().Value))
 	}
 	if len(vals) != 1 || vals[0] != "last" {
 		t.Errorf("got %v, want ['last']", vals)
@@ -665,9 +665,9 @@ func TestScanYieldsTombstones(t *testing.T) {
 	var tombstones []Key
 	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
-		keys = append(keys, iter.Key())
-		if iter.Value() == nil {
-			tombstones = append(tombstones, iter.Key())
+		keys = append(keys, iter.Current().Key)
+		if iter.Current().Value == nil {
+			tombstones = append(tombstones, iter.Current().Key)
 		}
 	}
 
@@ -739,10 +739,10 @@ func TestAllTombstones(t *testing.T) {
 	var tombstones []Key
 	iter := s.Iterator(key(0), key(100), f)
 	for iter.Next() {
-		if iter.Value() != nil {
-			t.Errorf("Scan(%v): expected nil value for tombstone", iter.Key())
+		if iter.Current().Value != nil {
+			t.Errorf("Scan(%v): expected nil value for tombstone", iter.Current().Key)
 		}
-		tombstones = append(tombstones, iter.Key())
+		tombstones = append(tombstones, iter.Current().Key)
 	}
 	if len(tombstones) != 3 {
 		t.Errorf("Scan tombstones: got %v, want [key(1) key(2) key(3)]", tombstones)

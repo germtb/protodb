@@ -468,7 +468,7 @@ func TestLoadedPerformance(t *testing.T) {
 	engine, _ := protodb.Open(t.TempDir())
 	engine.SetPolicy(&protodb.Policy{
 		FlushThreshold:      1024 * 1024 * 64,
-		SoftCompactionTheshold: 1000,
+		SoftCompactionThreshold: 1000,
 	})
 	for idx := 0; idx < totalEntries; idx++ {
 		engine.Put(uint64Key(uint64(idx)), val)
@@ -757,7 +757,17 @@ func BenchmarkL0vsL1(b *testing.B) {
 // written across multiple flushes. Each iteration creates a fresh DB,
 // populates it, and times only the compaction.
 func BenchmarkCompaction(b *testing.B) {
-	val := mustMarshal(b, makeItem(0))
+	// Pool of random-sized random-content buffers so snappy can't compress
+	// everything to nothing and trivialize the benchmark.
+	const poolSize = 64
+	const minSize, maxSize = 100, 2000
+	pool := make([][]byte, poolSize)
+	for i := range pool {
+		sz := minSize + i*(maxSize-minSize)/(poolSize-1)
+		pool[i] = make([]byte, sz)
+		rand.Read(pool[i])
+	}
+	nextVal := func(i int) []byte { return pool[i%poolSize] }
 
 	for _, entryCount := range []int{1000, 10000, 100000} {
 		b.Run(fmt.Sprintf("%d/LSM", entryCount), func(b *testing.B) {
@@ -767,7 +777,7 @@ func BenchmarkCompaction(b *testing.B) {
 
 				batchSize := 1000
 				for idx := 0; idx < entryCount; idx++ {
-					engine.Put(uint64Key(uint64(idx)), val)
+					engine.Put(uint64Key(uint64(idx)), nextVal(idx))
 					if (idx+1)%batchSize == 0 {
 						engine.Flush()
 					}
@@ -790,7 +800,7 @@ func BenchmarkCompaction(b *testing.B) {
 
 				batch := db.NewBatch()
 				for idx := 0; idx < entryCount; idx++ {
-					batch.Set(uint64Key(uint64(idx)), val, nil)
+					batch.Set(uint64Key(uint64(idx)), nextVal(idx), nil)
 					if (idx+1)%1000 == 0 {
 						batch.Commit(pebble.NoSync)
 						db.Flush()
@@ -1047,7 +1057,7 @@ func TestCompactionOverTime(t *testing.T) {
 	// Disable auto-compaction so we control when it happens.
 	engine.SetPolicy(&protodb.Policy{
 		FlushThreshold:      1024 * 1024 * 64, // 64MB — won't trigger auto-flush
-		SoftCompactionTheshold: 1000,             // effectively disable auto-compact
+		SoftCompactionThreshold: 1000,             // effectively disable auto-compact
 	})
 
 	const batchSize = 10000 // entries per flush (~1.2MB per batch)
@@ -1308,7 +1318,7 @@ func TestCompressionRatio(t *testing.T) {
 	engine, _ := protodb.Open(dir)
 	engine.SetPolicy(&protodb.Policy{
 		FlushThreshold:      1024 * 1024 * 64,
-		SoftCompactionTheshold: 1000,
+		SoftCompactionThreshold: 1000,
 	})
 
 	const entries = 100_000
@@ -1348,7 +1358,7 @@ func TestCompressionRatioRandom(t *testing.T) {
 	engine, _ := protodb.Open(dir)
 	engine.SetPolicy(&protodb.Policy{
 		FlushThreshold:      1024 * 1024 * 64,
-		SoftCompactionTheshold: 1000,
+		SoftCompactionThreshold: 1000,
 	})
 
 	const entries = 100_000

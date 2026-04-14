@@ -173,6 +173,7 @@ func (e *Engine) GetInSST(s *sst, key Key) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer handle.Close()
 
 	value, err := s.Get(key, handle)
 
@@ -248,6 +249,7 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 			return nil, err
 		}
 		values, errs, err := s.BulkGet(sortedKeys, handle)
+		handle.Close()
 		if err != nil {
 			return nil, err
 		}
@@ -306,6 +308,7 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 			return nil, err
 		}
 		values, errs, err := s.BulkGet(sortedKeys[keyIdx:batchEnd], handle)
+		handle.Close()
 		if err != nil {
 			return nil, err
 		}
@@ -385,22 +388,21 @@ func (e *Engine) getLocked(key Key) ([]byte, error) {
 }
 
 type mergeEntry struct {
-	key    Key
-	value  []byte
-	index  int
-	source Iterator
+	current KeyValue
+	index   int
+	source  Iterator
 }
 
 type mergeIterator struct {
 	heap    Heap[mergeEntry]
-	key     Key
-	value   []byte
+	current KeyValue
 	started bool
+	sources []Iterator
 }
 
 func newMergeIterator(sources []Iterator) *mergeIterator {
 	heap := newHeap(func(a mergeEntry, b mergeEntry) bool {
-		cmp := bytes.Compare(a.key, b.key)
+		cmp := bytes.Compare(a.current.Key, b.current.Key)
 		if cmp != 0 {
 			return cmp < 0
 		}
@@ -410,15 +412,14 @@ func newMergeIterator(sources []Iterator) *mergeIterator {
 	for idx, source := range sources {
 		if source.Next() {
 			heap.Push(mergeEntry{
-				key:    source.Key(),
-				value:  source.Value(),
-				index:  idx,
-				source: source,
+				current: source.Current(),
+				index:   idx,
+				source:  source,
 			})
 		}
 	}
 
-	return &mergeIterator{heap: heap}
+	return &mergeIterator{heap: heap, sources: sources}
 }
 
 func (it *mergeIterator) Next() bool {
@@ -428,19 +429,17 @@ func (it *mergeIterator) Next() bool {
 		// Advance this source and re-push if it has more
 		if entry.source.Next() {
 			it.heap.Push(mergeEntry{
-				key:    entry.source.Key(),
-				value:  entry.source.Value(),
-				index:  entry.index,
-				source: entry.source,
+				current: entry.source.Current(),
+				index:   entry.index,
+				source:  entry.source,
 			})
 		}
 
 		// Skip duplicate keys — we already yielded from a newer source
-		if it.started && bytes.Equal(entry.key, it.key) {
+		if it.started && bytes.Equal(entry.current.Key, it.current.Key) {
 			continue
 		}
-		it.key = entry.key
-		it.value = entry.value
+		it.current = entry.current
 		it.started = true
 
 		return true
@@ -448,12 +447,18 @@ func (it *mergeIterator) Next() bool {
 	return false
 }
 
-func (it *mergeIterator) Key() Key {
-	return it.key
+func (it *mergeIterator) Current() KeyValue {
+	return it.current
 }
 
-func (it *mergeIterator) Value() []byte {
-	return it.value
+func (it *mergeIterator) Close() error {
+	var err error
+
+	for _, source := range it.sources {
+		err = source.Close()
+	}
+
+	return err
 }
 
 func (e *Engine) Scan(lo, hi Key) Iterator {
@@ -614,6 +619,7 @@ func (e *Engine) compactLocked() error {
 				// L1 values; WriteSST(false) drops them at the bottom level.
 				mergedRange := newMergeIterator([]Iterator{l0Range, l1Range})
 				rangeSsts, err := WriteSST(e.ObjectsPath(), mergedRange, false)
+				handle.Close()
 				if err != nil {
 					return err
 				}
@@ -626,8 +632,9 @@ func (e *Engine) compactLocked() error {
 		}
 
 		for l0Entries.Next() {
-			key := l0Entries.Key()
-			value := l0Entries.Value()
+			entry := l0Entries.Current()
+			key := entry.Key
+			value := entry.Value
 
 			for l1Index+1 < len(l1ssts) && bytes.Compare(key, l1ssts[l1Index+1].firstKey) >= 0 {
 				err := finishRange()

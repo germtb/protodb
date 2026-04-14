@@ -99,6 +99,7 @@ type sst struct {
 
 type reader interface {
 	ReadAt(buffer []byte, offset int64) (int, error)
+	Close() error
 }
 
 // SST Constants
@@ -285,8 +286,9 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 	}
 
 	for entries.Next() {
-		key := entries.Key()
-		value := entries.Value()
+		entry := entries.Current()
+		key := entry.Key
+		value := entry.Value
 
 		if !writeTombstones && value == nil {
 			continue
@@ -645,8 +647,7 @@ type sstIterator struct {
 	block      *sstBlock
 	pos        int64
 	end        int64
-	key        Key
-	value      []byte
+	current    KeyValue
 	done       bool
 }
 
@@ -709,37 +710,41 @@ func (it *sstIterator) Next() bool {
 		}
 
 		if it.lo == nil || bytes.Compare(entryKey, it.lo) >= 0 {
-			it.key = entryKey
 			if valueLen == tombstone {
-				it.value = nil
+				it.current = KeyValue{entryKey, nil}
 			} else {
 				valueStart := it.pos - int64(valueLen) - 4 // -4: left/right are after value
-				it.value = data[valueStart : valueStart+int64(valueLen)]
+				it.current = KeyValue{entryKey, data[valueStart : valueStart+int64(valueLen)]}
 			}
 			return true
 		}
 	}
 }
 
-func (it *sstIterator) Key() Key {
-	return it.key
+func (it *sstIterator) Current() KeyValue {
+	return it.current
 }
 
-func (it *sstIterator) Value() []byte {
-	return it.value
+func (it *sstIterator) Close() error {
+	if it.reader == nil {
+		return nil
+	}
+	err := it.reader.Close()
+	it.reader = nil // guard against double-close
+	return err
 }
 
 // sstConcatIterator iterates over a sorted list of non-overlapping SSTs as a
 // single logical sorted source. Used for L1 SSTs where SSTs partition the key
 // space and don't overlap, so they can be walked sequentially without merging.
 type sstConcatIterator struct {
-	ssts     []*sst
-	openSST  func(*sst) (reader, error)
-	lo       Key
-	hi       Key
-	sstIndex int
-	current  *sstIterator
-	done     bool
+	ssts            []*sst
+	openSST         func(*sst) (reader, error)
+	lo              Key
+	hi              Key
+	sstIndex        int
+	currentIterator *sstIterator
+	done            bool
 }
 
 // newSSTConcatIterator creates an iterator over the given sorted, non-overlapping SSTs.
@@ -776,7 +781,7 @@ func toBlockIndices(ssts []*sst) []sstBlockIndex {
 func (it *sstConcatIterator) Next() bool {
 	for !it.done {
 		// Open the current SST iterator if needed
-		if it.current == nil {
+		if it.currentIterator == nil {
 			if it.sstIndex >= len(it.ssts) {
 				it.done = true
 				return false
@@ -792,26 +797,31 @@ func (it *sstConcatIterator) Next() bool {
 				it.done = true
 				return false
 			}
-			it.current = s.Iterator(it.lo, it.hi, r)
+			it.currentIterator = s.Iterator(it.lo, it.hi, r)
 		}
 
-		if it.current.Next() {
+		if it.currentIterator.Next() {
 			return true
 		}
 
 		// Current SST exhausted; move to next
-		it.current = nil
+		// TODO: add an error interface to the iterator and capture this error
+		_ = it.currentIterator.Close()
+		it.currentIterator = nil
 		it.sstIndex++
 	}
 	return false
 }
 
-func (it *sstConcatIterator) Key() Key {
-	return it.current.key
+func (it *sstConcatIterator) Current() KeyValue {
+	return it.currentIterator.current
 }
 
-func (it *sstConcatIterator) Value() []byte {
-	return it.current.value
+func (it *sstConcatIterator) Close() error {
+	if it.currentIterator != nil {
+		return it.currentIterator.Close()
+	}
+	return nil
 }
 
 // bsearchBlock returns the index of the first block whose FirstKey > key.

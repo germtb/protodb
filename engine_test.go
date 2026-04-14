@@ -28,11 +28,11 @@ func openTestEngine(t *testing.T) *Engine {
 // scanLive drains a scan iterator, dropping tombstones (value == nil).
 func scanLive(it Iterator) (keys []Key, values [][]byte) {
 	for it.Next() {
-		if it.Value() == nil {
+		if it.Current().Value == nil {
 			continue
 		}
-		keys = append(keys, append(Key(nil), it.Key()...))
-		values = append(values, append([]byte(nil), it.Value()...))
+		keys = append(keys, append(Key(nil), it.Current().Key...))
+		values = append(values, append([]byte(nil), it.Current().Value...))
 	}
 	return
 }
@@ -377,7 +377,7 @@ func TestEngineScanMemtableOnly(t *testing.T) {
 	var keys []Key
 	iter := engine.Scan(key(1), key(4))
 	for iter.Next() {
-		iterKey := iter.Key()
+		iterKey := iter.Current().Key
 		keys = append(keys, iterKey)
 	}
 
@@ -397,7 +397,7 @@ func TestEngineScanAcrossFlush(t *testing.T) {
 	var keys []Key
 	iter := engine.Scan(key(1), key(5))
 	for iter.Next() {
-		iterKey := iter.Key()
+		iterKey := iter.Current().Key
 		keys = append(keys, iterKey)
 	}
 
@@ -415,7 +415,7 @@ func TestEngineScanMergesDuplicates(t *testing.T) {
 	var values []string
 	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
-		value := iter.Value()
+		value := iter.Current().Value
 		values = append(values, string(value))
 	}
 
@@ -478,7 +478,7 @@ func TestEngineScanBreakEarly(t *testing.T) {
 	var keys []Key
 	iter := engine.Scan(key(1), key(4))
 	for iter.Next() {
-		iterKey := iter.Key()
+		iterKey := iter.Current().Key
 		keys = append(keys, iterKey)
 		if bytes.Equal(iterKey, key(2)) {
 			break
@@ -506,7 +506,7 @@ func TestEngineScanMultipleSSTs(t *testing.T) {
 	var keys []Key
 	iter := engine.Scan(key(1), key(6))
 	for iter.Next() {
-		iterKey := iter.Key()
+		iterKey := iter.Current().Key
 		keys = append(keys, iterKey)
 	}
 
@@ -695,7 +695,7 @@ func TestEngineEmptyFlushThenScan(t *testing.T) {
 	var keys []Key
 	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
-		iterKey := iter.Key()
+		iterKey := iter.Current().Key
 		keys = append(keys, iterKey)
 	}
 
@@ -863,7 +863,7 @@ func TestEngineDeleteResurrectScan(t *testing.T) {
 	var values []string
 	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
-		value := iter.Value()
+		value := iter.Current().Value
 		values = append(values, string(value))
 	}
 
@@ -1282,8 +1282,8 @@ func TestScanAfterCompact(t *testing.T) {
 	var values []string
 	iter := engine.Scan(key(1), key(6))
 	for iter.Next() {
-		iterKey := iter.Key()
-		value := iter.Value()
+		iterKey := iter.Current().Key
+		value := iter.Current().Value
 		keys = append(keys, iterKey)
 		values = append(values, string(value))
 	}
@@ -1323,7 +1323,7 @@ func TestScanAfterCompactWithOverwrites(t *testing.T) {
 	var values []string
 	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
-		value := iter.Value()
+		value := iter.Current().Value
 		values = append(values, string(value))
 	}
 
@@ -1371,7 +1371,7 @@ func TestDeleteThenCompactDropsTombstones(t *testing.T) {
 	var keys []Key
 	iter := engine.Scan(key(0), key(10))
 	for iter.Next() {
-		iterKey := iter.Key()
+		iterKey := iter.Current().Key
 		keys = append(keys, iterKey)
 	}
 	if len(keys) != 2 || !bytes.Equal(keys[0], key(1)) || !bytes.Equal(keys[1], key(3)) {
@@ -1791,7 +1791,7 @@ func TestCompactThenContinueWriting(t *testing.T) {
 	var keys []Key
 	iter := engine.Scan(key(0), key(100))
 	for iter.Next() {
-		iterKey := iter.Key()
+		iterKey := iter.Current().Key
 		keys = append(keys, iterKey)
 	}
 	if len(keys) != 3 {
@@ -2984,7 +2984,7 @@ func TestWALRecoveryScan(t *testing.T) {
 	var keys []Key
 	iter := engine2.Scan(key(1), key(4))
 	for iter.Next() {
-		iterKey := iter.Key()
+		iterKey := iter.Current().Key
 		keys = append(keys, iterKey)
 	}
 
@@ -3228,8 +3228,8 @@ func TestAdversarialScanComplexMerge(t *testing.T) {
 	var vals []string
 	iter := engine.Scan(key(1), key(8))
 	for iter.Next() {
-		iterKey := iter.Key()
-		val := iter.Value()
+		iterKey := iter.Current().Key
+		val := iter.Current().Value
 		keys = append(keys, iterKey)
 		vals = append(vals, string(val))
 	}
@@ -4090,8 +4090,8 @@ func TestMetamorphic(t *testing.T) {
 			var engineKeys []Key
 			engineValues := make(map[string]string)
 			for iter.Next() {
-				engineKeys = append(engineKeys, iter.Key())
-				engineValues[string(iter.Key())] = string(iter.Value())
+				engineKeys = append(engineKeys, iter.Current().Key)
+				engineValues[string(iter.Current().Key)] = string(iter.Current().Value)
 			}
 
 			// Build expected from ref
@@ -4203,8 +4203,8 @@ func TestMetamorphicWithPartitioning(t *testing.T) {
 			var engineKeys []Key
 			engineValues := make(map[string]string)
 			for iter.Next() {
-				engineKeys = append(engineKeys, iter.Key())
-				engineValues[string(iter.Key())] = string(iter.Value())
+				engineKeys = append(engineKeys, iter.Current().Key)
+				engineValues[string(iter.Current().Key)] = string(iter.Current().Value)
 			}
 
 			var refKeys []uint64
@@ -4243,12 +4243,12 @@ func TestMetamorphicWithPartitioning(t *testing.T) {
 	iter := engine.Scan(key(0), key(keySpace))
 	var scanCount int
 	for iter.Next() {
-		iterKey := iter.Key()
+		iterKey := iter.Current().Key
 		expected := ref[binary.BigEndian.Uint64(iterKey)]
 		if expected == nil {
 			t.Fatalf("final Scan yielded deleted key %v", iterKey)
 		}
-		if string(iter.Value()) != string(expected) {
+		if string(iter.Current().Value) != string(expected) {
 			t.Fatalf("final Scan value mismatch at key %v", iterKey)
 		}
 		scanCount++
@@ -5801,7 +5801,7 @@ func TestAggressiveAutoCompaction(t *testing.T) {
 
 	// Force every write to flush, every flush to spawn a compaction.
 	engine.policy.FlushThreshold = 0
-	engine.policy.CompactionThreshold = 0
+	engine.policy.SoftCompactionThreshold = 0
 
 	const writers = 4
 	const writesPerWriter = 250
@@ -5922,7 +5922,7 @@ func TestCompactCleansUpOrphans(t *testing.T) {
 	}
 	defer engine.Close()
 
-	engine.SetPolicy(&Policy{CompactionThreshold: 1, FlushThreshold: 1024 * 1024 * 64})
+	engine.SetPolicy(&Policy{SoftCompactionThreshold: 1, FlushThreshold: 1024 * 1024 * 64})
 
 	const keysPerCycle = 50
 	const cycles = 4
