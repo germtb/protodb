@@ -508,6 +508,9 @@ func (s *sst) Get(key Key, reader reader) ([]byte, error) {
 			return nil, ErrCorrupted
 		}
 		keyLen := int(binary.BigEndian.Uint32(data[inBlockOffset : inBlockOffset+4]))
+		if int64(inBlockOffset+4+keyLen+4) > end {
+			return nil, ErrCorrupted
+		}
 		entryKey := data[inBlockOffset+4 : inBlockOffset+4+keyLen]
 		valueLen := binary.BigEndian.Uint32(data[inBlockOffset+4+keyLen : inBlockOffset+8+keyLen])
 		isTombstone := valueLen == tombstone
@@ -516,6 +519,9 @@ func (s *sst) Get(key Key, reader reader) ([]byte, error) {
 		}
 		leftPosition := inBlockOffset + 8 + keyLen + int(valueLen)
 		rightPosition := leftPosition + 2
+		if int64(rightPosition+2) > end {
+			return nil, ErrCorrupted
+		}
 
 		cmp := bytes.Compare(key, entryKey)
 		if cmp == 0 {
