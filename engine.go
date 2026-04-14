@@ -11,14 +11,10 @@ import (
 	"sync"
 )
 
-type Level struct {
-	manifest *Manifest
-	ssts     []*sst
-}
-
 type Policy struct {
-	CompactionThreshold uint64
-	FlushThreshold      uint64
+	SoftCompactionThreshold int
+	HardCompactionThreshold int
+	FlushThreshold          int
 }
 
 type Engine struct {
@@ -28,33 +24,26 @@ type Engine struct {
 	path            string
 	fileTable       *FileTable
 	wal             *WAL
-	l0              *Level
-	l1              *Level
+	manifest        *Manifest
+	l0ssts          []*sst
+	l1ssts          []*sst
 	policy          *Policy
+
+	// Counters (updated under flushMutex / compactionMutex respectively).
+	flushCount      uint64
+	compactionCount uint64
 }
 
-func newLevel(path string, name string) (*Level, error) {
-	manifest, err := newManifest(filepath.Join(path, name))
-	if err != nil {
-		return nil, err
-	}
-
-	ssts := make([]*sst, 0)
-
-	for _, entry := range manifest.hashes {
-		sst, err := ReadSST(filepath.Join(path, "objects"), entry, nil)
-
+func loadSSTs(objectsPath string, hashes []string) ([]*sst, error) {
+	ssts := make([]*sst, 0, len(hashes))
+	for _, h := range hashes {
+		s, err := ReadSST(objectsPath, h, nil)
 		if err != nil {
 			return nil, err
 		}
-
-		ssts = append(ssts, sst)
+		ssts = append(ssts, s)
 	}
-
-	return &Level{
-		manifest,
-		ssts,
-	}, nil
+	return ssts, nil
 }
 
 func Open(path string) (*Engine, error) {
@@ -70,12 +59,17 @@ func Open(path string) (*Engine, error) {
 		return nil, err
 	}
 
-	l0, err := newLevel(path, "l0")
+	manifest, err := newManifest(filepath.Join(path, "manifest"))
 	if err != nil {
 		return nil, err
 	}
 
-	l1, err := newLevel(path, "l1")
+	objectsPath := filepath.Join(path, "objects")
+	l0ssts, err := loadSSTs(objectsPath, manifest.L0Hashes())
+	if err != nil {
+		return nil, err
+	}
+	l1ssts, err := loadSSTs(objectsPath, manifest.L1Hashes())
 	if err != nil {
 		return nil, err
 	}
@@ -87,19 +81,27 @@ func Open(path string) (*Engine, error) {
 		return nil, err
 	}
 
-	return &Engine{
+	e := &Engine{
 		memtable:  memtable,
 		path:      path,
 		fileTable: newFileTable(128),
 		wal:       wal,
-		l0:        l0,
-		l1:        l1,
+		manifest:  manifest,
+		l0ssts:    l0ssts,
+		l1ssts:    l1ssts,
 		policy: &Policy{
-			CompactionThreshold: 4,                // 4 L0 ssts
-			FlushThreshold:      1024 * 1024 * 64, // 64Mb
-
+			SoftCompactionThreshold: 4,                // 4 L0 ssts
+			HardCompactionThreshold: 16,               // 16 L0 ssts
+			FlushThreshold:          1024 * 1024 * 64, // 64Mb
 		},
-	}, nil
+	}
+
+	// Sweep any SST files orphaned by a crash between compaction's manifest
+	// sync and its inline os.Remove calls. Cheap — runs once per Open.
+	if err := e.gcLocked(); err != nil {
+		return nil, err
+	}
+	return e, nil
 }
 
 func (e *Engine) WALPath() string {
@@ -114,14 +116,35 @@ func (e *Engine) SetPolicy(policy *Policy) {
 	e.policy = policy
 }
 
-// L1Stats returns the number of SSTs and total byte size of L1.
-func (e *Engine) L1Stats() (sstCount int, totalBytes int64) {
+// EngineStats is a snapshot of operational counters + level sizes.
+type EngineStats struct {
+	FlushCount      uint64
+	CompactionCount uint64
+	L0SSTs          int
+	L0Bytes         int64
+	L1SSTs          int
+	L1Bytes         int64
+}
+
+// Stats returns a snapshot of counters and level sizes.
+func (e *Engine) Stats() EngineStats {
 	e.flushMutex.RLock()
 	defer e.flushMutex.RUnlock()
-	for _, s := range e.l1.ssts {
-		totalBytes += s.fileSize
+	var l0Bytes, l1Bytes int64
+	for _, s := range e.l0ssts {
+		l0Bytes += s.fileSize
 	}
-	return len(e.l1.ssts), totalBytes
+	for _, s := range e.l1ssts {
+		l1Bytes += s.fileSize
+	}
+	return EngineStats{
+		FlushCount:      e.flushCount,
+		CompactionCount: e.compactionCount,
+		L0SSTs:          len(e.l0ssts),
+		L0Bytes:         l0Bytes,
+		L1SSTs:          len(e.l1ssts),
+		L1Bytes:         l1Bytes,
+	}
 }
 
 func (e *Engine) Close() error {
@@ -219,7 +242,7 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 	}
 
 	// 2. L0 SSTs (newest first)
-	for _, s := range e.l0.ssts {
+	for _, s := range e.l0ssts {
 		handle, err := e.fileTable.getOrOpen(s.path)
 		if err != nil {
 			return nil, err
@@ -252,7 +275,7 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 		k := sortedKeys[keyIdx]
 
 		// Binary search [startIdx:] for the SST containing k
-		ssts := e.l1.ssts[startIdx:]
+		ssts := e.l1ssts[startIdx:]
 		offset := sort.Search(len(ssts), func(i int) bool {
 			return bytes.Compare(ssts[i].firstKey, k) > 0
 		}) - 1
@@ -265,8 +288,8 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 
 		// Determine how many subsequent keys belong to this SST.
 		var nextFirstKey Key
-		if sstIdx+1 < len(e.l1.ssts) {
-			nextFirstKey = e.l1.ssts[sstIdx+1].firstKey
+		if sstIdx+1 < len(e.l1ssts) {
+			nextFirstKey = e.l1ssts[sstIdx+1].firstKey
 		}
 
 		batchEnd := keyIdx + 1
@@ -277,7 +300,7 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 			batchEnd++
 		}
 
-		s := e.l1.ssts[sstIdx]
+		s := e.l1ssts[sstIdx]
 		handle, err := e.fileTable.getOrOpen(s.path)
 		if err != nil {
 			return nil, err
@@ -325,7 +348,7 @@ func (e *Engine) getLocked(key Key) ([]byte, error) {
 		return value, nil
 	}
 
-	for _, s := range e.l0.ssts {
+	for _, s := range e.l0ssts {
 		value, err := e.GetInSST(s, key)
 
 		if errors.Is(err, ErrNotFound) {
@@ -340,15 +363,15 @@ func (e *Engine) getLocked(key Key) ([]byte, error) {
 	}
 
 	// Binary search on L1 SSTs
-	index := sort.Search(len(e.l1.ssts), func(i int) bool {
-		return bytes.Compare(e.l1.ssts[i].firstKey, key) > 0
+	index := sort.Search(len(e.l1ssts), func(i int) bool {
+		return bytes.Compare(e.l1ssts[i].firstKey, key) > 0
 	}) - 1
 
-	if index < 0 || index >= len(e.l1.ssts) {
+	if index < 0 || index >= len(e.l1ssts) {
 		return nil, nil
 	}
 
-	value, err = e.GetInSST(e.l1.ssts[index], key)
+	value, err = e.GetInSST(e.l1ssts[index], key)
 
 	if errors.Is(err, ErrNotFound) {
 		return nil, nil
@@ -437,10 +460,10 @@ func (e *Engine) Scan(lo, hi Key) Iterator {
 	// Clone mutates COW flags, so it needs an exclusive lock. It's O(1).
 	e.flushMutex.Lock()
 	memtable := e.memtable.Clone()
-	l0ssts := make([]*sst, len(e.l0.ssts))
-	l1ssts := make([]*sst, len(e.l1.ssts))
-	copy(l0ssts, e.l0.ssts)
-	copy(l1ssts, e.l1.ssts)
+	l0ssts := make([]*sst, len(e.l0ssts))
+	l1ssts := make([]*sst, len(e.l1ssts))
+	copy(l0ssts, e.l0ssts)
+	copy(l1ssts, e.l1ssts)
 	e.flushMutex.Unlock()
 
 	return e.scan(lo, hi, memtable, l0ssts, l1ssts)
@@ -485,7 +508,7 @@ func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts 
 }
 
 func (e *Engine) maybeFlushLocked() error {
-	if e.memtable.ByteSize() <= e.policy.FlushThreshold {
+	if e.memtable.ByteSize() <= uint64(e.policy.FlushThreshold) {
 		return nil
 	}
 	if err := e.flushLocked(); err != nil {
@@ -494,7 +517,7 @@ func (e *Engine) maybeFlushLocked() error {
 	// Auto-flush triggers a background compaction. Manual Flush() does not —
 	// tests that inspect L0/L1 state immediately after Flush() rely on it
 	// being a synchronous, side-effect-free checkpoint.
-	if len(e.l0.ssts) > int(e.policy.CompactionThreshold) {
+	if len(e.l0ssts) > e.policy.SoftCompactionThreshold {
 		if e.compactionMutex.TryLock() {
 			go func() {
 				defer e.compactionMutex.Unlock()
@@ -513,27 +536,36 @@ func (e *Engine) Flush() error {
 
 func (e *Engine) flushLocked() error {
 	new_ssts, err := WriteSST(e.ObjectsPath(), e.memtable.Entries(), true)
-
 	if err != nil {
 		return err
 	}
 
-	newHashes := e.l0.manifest.hashes[:]
+	// Commit SST renames (and, via metadata-after-data ordering, their content)
+	// before the manifest references them.
+	if len(new_ssts) > 0 {
+		err := syncDir(e.ObjectsPath())
+		if err != nil {
+			return err
+		}
+	}
+
+	newHashes := slices.Clone(e.manifest.L0Hashes())
 	for _, s := range new_ssts {
 		newHashes = slices.Insert(newHashes, 0, s.hash)
 	}
 
-	err = e.l0.manifest.Update(newHashes)
+	if err := e.manifest.Update(levelL0, newHashes); err != nil {
+		return err
+	}
+	err = e.manifest.Sync()
 	if err != nil {
 		return err
 	}
-	if err := e.l0.manifest.Sync(); err != nil {
-		return err
-	}
 
-	e.l0.ssts = append(new_ssts, e.l0.ssts...)
+	e.l0ssts = append(new_ssts, e.l0ssts...)
 	e.memtable = newMemtable()
 	e.wal.Clear()
+	e.flushCount++
 
 	return nil
 }
@@ -546,10 +578,10 @@ func (e *Engine) Compact() error {
 
 func (e *Engine) compactLocked() error {
 	e.flushMutex.Lock()
-	l0ssts := make([]*sst, len(e.l0.ssts))
-	l1ssts := make([]*sst, len(e.l1.ssts))
-	copy(l0ssts, e.l0.ssts)
-	copy(l1ssts, e.l1.ssts)
+	l0ssts := make([]*sst, len(e.l0ssts))
+	l1ssts := make([]*sst, len(e.l1ssts))
+	copy(l0ssts, e.l0ssts)
+	copy(l1ssts, e.l1ssts)
 	e.flushMutex.Unlock()
 
 	l0Entries := e.scan(nil, nil, nil, l0ssts, nil)
@@ -615,6 +647,12 @@ func (e *Engine) compactLocked() error {
 		}
 	}
 
+	// Commit SST renames (and their content, via FS ordering) before the
+	// manifests reference them.
+	if err := syncDir(e.ObjectsPath()); err != nil {
+		return err
+	}
+
 	e.flushMutex.Lock()
 	defer e.flushMutex.Unlock()
 
@@ -622,27 +660,50 @@ func (e *Engine) compactLocked() error {
 	for i, sst := range new_ssts {
 		new_l1_ssts[i] = sst.hash
 	}
-	err := e.l1.manifest.Update(new_l1_ssts)
-	if err != nil {
+	// Order matters: L1 frame first, then L0. On a torn-tail crash the safe
+	// outcome is "only L1 landed" — reads from L0 still shadow L1 correctly
+	// with the same values. "L0 without L1" cannot happen because fd writes
+	// preserve offset order.
+	if err := e.manifest.Update(levelL1, new_l1_ssts); err != nil {
 		return err
 	}
 
-	e.l1.ssts = new_ssts
+	e.l1ssts = new_ssts
 
-	err = e.l0.manifest.TrimEnd(len(l0ssts))
-	if err != nil {
+	newL0 := slices.Clone(e.manifest.L0Hashes())
+	newL0 = newL0[:len(newL0)-len(l0ssts)]
+	if err := e.manifest.Update(levelL0, newL0); err != nil {
 		return err
 	}
-	e.l0.ssts = e.l0.ssts[:len(e.l0.ssts)-len(l0ssts)]
+	e.l0ssts = e.l0ssts[:len(e.l0ssts)-len(l0ssts)]
 
-	if err := e.l1.manifest.Sync(); err != nil {
-		return err
-	}
-	if err := e.l0.manifest.Sync(); err != nil {
+	if err := e.manifest.Sync(); err != nil {
 		return err
 	}
 
-	return e.gcLocked()
+	// Delete orphaned ssts
+	kept := func(hash string) bool {
+		for _, s := range new_ssts {
+			if s.hash == hash {
+				return true
+			}
+		}
+		return false
+	}
+	for _, oldSST := range l1ssts {
+		if !kept(oldSST.hash) {
+			_ = os.Remove(oldSST.path)
+		}
+	}
+	for _, oldSST := range l0ssts {
+		if !kept(oldSST.hash) {
+			_ = os.Remove(oldSST.path)
+		}
+	}
+
+	e.compactionCount++
+
+	return nil
 }
 
 func (e *Engine) CloudSync() error {
@@ -662,13 +723,15 @@ func isSSTHash(name string) bool {
 }
 
 // gcLocked removes SST files in ObjectsPath() that are not referenced by
-// either level's manifest. Caller must hold compactionMutex and flushMutex.
+// the manifest. Caller must hold compactionMutex and flushMutex.
 func (e *Engine) gcLocked() error {
-	referenced := make(map[string]struct{}, len(e.l0.manifest.hashes)+len(e.l1.manifest.hashes))
-	for _, h := range e.l0.manifest.hashes {
+	l0 := e.manifest.L0Hashes()
+	l1 := e.manifest.L1Hashes()
+	referenced := make(map[string]struct{}, len(l0)+len(l1))
+	for _, h := range l0 {
 		referenced[h] = struct{}{}
 	}
-	for _, h := range e.l1.manifest.hashes {
+	for _, h := range l1 {
 		referenced[h] = struct{}{}
 	}
 
@@ -714,8 +777,18 @@ type Transaction struct {
 }
 
 func (e *Engine) Transaction() Transaction {
-	e.flushMutex.Lock()
+	// Write stall: if L0 is too tall, force a synchronous compaction before
+	// accepting the write. compactionMutex serializes so at most one writer
+	// actually runs the compaction; others wait here and re-check after.
+	if len(e.l0ssts) >= e.policy.HardCompactionThreshold {
+		e.compactionMutex.Lock()
+		if len(e.l0ssts) >= e.policy.HardCompactionThreshold {
+			_ = e.compactLocked()
+		}
+		e.compactionMutex.Unlock()
+	}
 
+	e.flushMutex.Lock()
 	return Transaction{
 		engine: e,
 	}

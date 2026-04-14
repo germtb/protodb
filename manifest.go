@@ -3,29 +3,46 @@ package protodb
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"hash/crc32"
 	"os"
 )
-
-type Manifest struct {
-	path   string
-	handle *os.File
-	hashes []string
-}
 
 /*
 
 Manifest layout:
 
-A list of snapshots
+A log of per-level snapshots. Each frame is a full replacement of one level's
+hash list.
 
-┌───────────┬──────────┬────────────────┐
-│ crc32 u32 │ len u32  │ hash [32]byte  │
-└───────────┴──────────┴────────────────┘
+┌──────────┬──────────┬──────────┬──────────────┐
+│ crc32 u32│ level u8 │ len u32  │ hash[32]×n   │
+└──────────┴──────────┴──────────┴──────────────┘
+
+Flush appends one L0 frame. Compaction appends an L1 frame followed by an L0
+frame, then one Sync() commits both. Because writes to a single fd preserve
+offset ordering, the worst torn-tail scenario is "L1 frame only, no L0"; that
+leaves dupes in L0+L1 that the next compaction cleans up. "L0 without L1"
+cannot happen.
+
+On replay: each valid CRC frame replaces that level's hash list. On first bad
+CRC / short read, stop and truncate.
 
 */
 
 const hashSize = 32 // sha256
+
+const (
+	levelL0 byte = 0
+	levelL1 byte = 1
+)
+
+type Manifest struct {
+	path      string
+	handle    *os.File
+	l0Hashes  []string
+	l1Hashes  []string
+}
 
 func newManifest(path string) (*Manifest, error) {
 	handle, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -38,28 +55,38 @@ func newManifest(path string) (*Manifest, error) {
 		return nil, err
 	}
 
+	var l0, l1 []string
 	offset := 0
-	var snapshot []byte
 
-	for offset+8 <= len(data) {
-		checksum := binary.BigEndian.Uint32(data[offset:])
-		offset += 4
-		entriesLen := binary.BigEndian.Uint32(data[offset:])
-		offset += 4
-
-		if offset+int(entriesLen)*hashSize > len(data) {
+	for offset+9 <= len(data) {
+		checksum := binary.BigEndian.Uint32(data[offset : offset+4])
+		level := data[offset+4]
+		entriesLen := binary.BigEndian.Uint32(data[offset+5 : offset+9])
+		end := offset + 9 + int(entriesLen)*hashSize
+		if end > len(data) {
+			break
+		}
+		if crc32.ChecksumIEEE(data[offset+4:end]) != checksum {
 			break
 		}
 
-		hashes := data[offset : offset+int(entriesLen)*hashSize]
-
-		if crc32.ChecksumIEEE(data[offset-4:offset+int(entriesLen)*hashSize]) != checksum {
+		if level != levelL0 && level != levelL1 {
+			// unknown level byte — treat as corrupt
 			break
 		}
 
-		offset += int(entriesLen) * hashSize
+		hashes := make([]string, entriesLen)
+		for i := range hashes {
+			off := offset + 9 + i*hashSize
+			hashes[i] = hex.EncodeToString(data[off : off+hashSize])
+		}
+		if level == levelL0 {
+			l0 = hashes
+		} else {
+			l1 = hashes
+		}
 
-		snapshot = hashes
+		offset = end
 	}
 
 	if offset < len(data) {
@@ -68,48 +95,71 @@ func newManifest(path string) (*Manifest, error) {
 		}
 	}
 
-	hashes := make([]string, len(snapshot)/hashSize)
+	return &Manifest{
+		path:     path,
+		handle:   handle,
+		l0Hashes: l0,
+		l1Hashes: l1,
+	}, nil
+}
 
-	for i := range len(snapshot) / hashSize {
-		hashes[i] = hex.EncodeToString(snapshot[i*hashSize : (i+1)*hashSize])
+func (m *Manifest) L0Hashes() []string {
+	return m.l0Hashes
+}
+
+func (m *Manifest) L1Hashes() []string {
+	return m.l1Hashes
+}
+
+// Update appends a frame that replaces `level`'s hash list with `hashes`.
+// Does not fsync — caller batches with Sync().
+func (m *Manifest) Update(level byte, hashes []string) error {
+	if level != levelL0 && level != levelL1 {
+		return fmt.Errorf("manifest: invalid level %d", level)
 	}
 
-	return &Manifest{path: path, hashes: hashes, handle: handle}, nil
-}
-
-func (m *Manifest) Hashes() []string {
-	return m.hashes[:]
-}
-
-func (m *Manifest) TrimEnd(l int) error {
-	new_hashes := m.hashes[:len(m.hashes)-l]
-	return m.Update(new_hashes)
-}
-
-func (m *Manifest) Update(hashes []string) error {
-	data := make([]byte, len(hashes)*hashSize+8)
-
-	binary.BigEndian.PutUint32(data[4:], uint32(len(hashes)))
+	data := make([]byte, 9+len(hashes)*hashSize)
+	data[4] = level
+	binary.BigEndian.PutUint32(data[5:9], uint32(len(hashes)))
 
 	for i, s := range hashes {
 		hash, err := hex.DecodeString(s)
 		if err != nil {
 			return err
 		}
-		copy(data[8+i*hashSize:], hash)
+		copy(data[9+i*hashSize:], hash)
 	}
 
 	checksum := crc32.ChecksumIEEE(data[4:])
-	binary.BigEndian.PutUint32(data[0:], checksum)
+	binary.BigEndian.PutUint32(data[0:4], checksum)
 
-	_, err := m.handle.Write(data)
-	if err != nil {
+	if _, err := m.handle.Write(data); err != nil {
 		return err
 	}
-	m.hashes = hashes
+
+	switch level {
+	case levelL0:
+		m.l0Hashes = hashes
+	case levelL1:
+		m.l1Hashes = hashes
+	}
 	return nil
 }
 
 func (m *Manifest) Sync() error {
 	return m.handle.Sync()
+}
+
+// syncDir fsyncs a directory so preceding renames (and the file content they
+// reference, via FS metadata-after-data ordering) are durable.
+func syncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		dir.Close()
+		return err
+	}
+	return dir.Close()
 }

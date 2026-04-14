@@ -239,7 +239,9 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 		sha := sha256.Sum256(buffer.Bytes())
 		hash := hex.EncodeToString(sha[:])
 
-		// Write to temp file, sync, rename
+		// Write to temp file, rename. No per-file fsync — callers batch a single
+		// syncDir(path) + manifest fsync after all SSTs in the flush/compaction
+		// are written.
 		tempfile, err := os.CreateTemp(path, "-temp-")
 		if err != nil {
 			return err
@@ -253,8 +255,7 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 		if err != nil {
 			return err
 		}
-		err = tempfile.Sync()
-		if err != nil {
+		if err := tempfile.Close(); err != nil {
 			return err
 		}
 
@@ -263,9 +264,6 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 		if err != nil {
 			return err
 		}
-		// No dir fsync here — the subsequent manifest fsync (which is what
-		// actually commits this SST into the engine's view) forces a
-		// metadata-journal commit that persists this rename on ext4/APFS.
 
 		ssts = append(ssts, &sst{
 			cache:    newLRU[uint64, sstBlock](128, nil),

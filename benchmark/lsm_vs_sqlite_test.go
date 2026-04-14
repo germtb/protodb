@@ -6,9 +6,11 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	mathrand "math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -466,7 +468,7 @@ func TestLoadedPerformance(t *testing.T) {
 	engine, _ := protodb.Open(t.TempDir())
 	engine.SetPolicy(&protodb.Policy{
 		FlushThreshold:      1024 * 1024 * 64,
-		CompactionThreshold: 1000,
+		SoftCompactionTheshold: 1000,
 	})
 	for idx := 0; idx < totalEntries; idx++ {
 		engine.Put(uint64Key(uint64(idx)), val)
@@ -479,8 +481,8 @@ func TestLoadedPerformance(t *testing.T) {
 		engine.Flush()
 		engine.Compact()
 	}
-	l1Count, l1Size := engine.L1Stats()
-	t.Logf("LSM loaded: %d SSTs, %.1f MB", l1Count, float64(l1Size)/(1024*1024))
+	s := engine.Stats()
+	t.Logf("LSM loaded: %d SSTs, %.1f MB", s.L1SSTs, float64(s.L1Bytes)/(1024*1024))
 
 	measure("Get/LSM", func(i int) {
 		engine.Get(poolKey(i % totalEntries))
@@ -809,6 +811,228 @@ func BenchmarkCompaction(b *testing.B) {
 	}
 }
 
+// BenchmarkSustainedWrites writes `totalOps` random-sized entries (100B–2KB)
+// in a tight loop, exercising the full write path (memtable → WAL → flush →
+// compaction auto-trigger). Random data defeats snappy compression so the
+// memtable actually fills and flushes actually fire.
+func BenchmarkSustainedWrites(b *testing.B) {
+	// Pool of pre-randomized buffers of varying sizes. Each Put gets a
+	// distinct slice (engines store by reference, so reusing one buffer
+	// across Puts would make them all identical).
+	const poolSize = 64
+	const minSize, maxSize = 100, 2000
+	// Sizes spread deterministically across the range; content fully random.
+	pool := make([][]byte, poolSize)
+	for i := range pool {
+		sz := minSize + i*(maxSize-minSize)/(poolSize-1)
+		pool[i] = make([]byte, sz)
+		rand.Read(pool[i])
+	}
+	nextVal := func(i int) []byte { return pool[i%poolSize] }
+
+	for _, totalOps := range []int{100_000, 500_000, 2_000_000} {
+		b.Run(fmt.Sprintf("%d/LSM", totalOps), func(b *testing.B) {
+			var lastStats protodb.EngineStats
+			for iter := 0; iter < b.N; iter++ {
+				b.StopTimer()
+				engine := initLSM(b)
+				b.StartTimer()
+				for idx := 0; idx < totalOps; idx++ {
+					engine.Put(uint64Key(uint64(idx)), nextVal(idx))
+				}
+				lastStats = engine.Stats()
+				engine.Close()
+				b.StopTimer()
+			}
+			b.Logf("flushes=%d compactions=%d  L0=%d SSTs (%s)  L1=%d SSTs (%s)  total=%s",
+				lastStats.FlushCount, lastStats.CompactionCount,
+				lastStats.L0SSTs, formatBytes(lastStats.L0Bytes),
+				lastStats.L1SSTs, formatBytes(lastStats.L1Bytes),
+				formatBytes(lastStats.L0Bytes+lastStats.L1Bytes))
+		})
+
+		b.Run(fmt.Sprintf("%d/Pebble", totalOps), func(b *testing.B) {
+			var lastSummary string
+			for iter := 0; iter < b.N; iter++ {
+				b.StopTimer()
+				db := initPebble(b)
+				b.StartTimer()
+				for idx := 0; idx < totalOps; idx++ {
+					db.Set(uint64Key(uint64(idx)), nextVal(idx), pebble.NoSync)
+				}
+				m := db.Metrics()
+				var totalSSTs int
+				var totalBytes uint64
+				var perLevel []string
+				for lvl, lm := range m.Levels {
+					if lm.NumFiles == 0 {
+						continue
+					}
+					totalSSTs += int(lm.NumFiles)
+					totalBytes += uint64(lm.Size)
+					perLevel = append(perLevel, fmt.Sprintf("L%d=%d/%s", lvl, lm.NumFiles, formatBytes(lm.Size)))
+				}
+				lastSummary = fmt.Sprintf("flushes=%d compactions=%d  %s  total=%d SSTs %s",
+					m.Flush.Count, m.Compact.Count,
+					strings.Join(perLevel, " "),
+					totalSSTs, formatBytes(int64(totalBytes)))
+				db.Close()
+				b.StopTimer()
+			}
+			b.Logf("%s", lastSummary)
+		})
+	}
+}
+
+// BenchmarkMixedWorkload runs write + point-Get + Scan phases with tombstones
+// sprinkled in. Reports per-phase throughput and the final engine stats so we
+// can see read-amp effects of accumulated L0 SSTs.
+func BenchmarkMixedWorkload(b *testing.B) {
+	const poolSize = 64
+	const minSize, maxSize = 100, 2000
+	pool := make([][]byte, poolSize)
+	for i := range pool {
+		sz := minSize + i*(maxSize-minSize)/(poolSize-1)
+		pool[i] = make([]byte, sz)
+		rand.Read(pool[i])
+	}
+	nextVal := func(i int) []byte { return pool[i%poolSize] }
+
+	const numGets = 10_000
+	const numScans = 200
+	const scanSize = 500
+	const deleteRate = 20 // one delete per N puts
+
+	sizes := []int{500_000, 2_000_000}
+
+	for _, totalOps := range sizes {
+		b.Run(fmt.Sprintf("%d/LSM", totalOps), func(b *testing.B) {
+			for iter := 0; iter < b.N; iter++ {
+				engine := initLSM(b)
+
+				// ---- Write phase (with tombstones) ----
+				writeStart := time.Now()
+				var deletes int
+				for idx := 0; idx < totalOps; idx++ {
+					if idx > 1000 && idx%deleteRate == 0 {
+						// Delete a recent-ish key we just wrote.
+						target := uint64(idx - 1 - mathrand.IntN(100))
+						engine.Delete(uint64Key(target))
+						deletes++
+					} else {
+						engine.Put(uint64Key(uint64(idx)), nextVal(idx))
+					}
+				}
+				writeDur := time.Since(writeStart)
+				stats := engine.Stats()
+
+				// ---- Get phase (random point lookups) ----
+				getStart := time.Now()
+				rng := mathrand.New(mathrand.NewPCG(42, 42))
+				for i := 0; i < numGets; i++ {
+					k := uint64(rng.IntN(totalOps))
+					engine.Get(uint64Key(k))
+				}
+				getDur := time.Since(getStart)
+
+				// ---- Scan phase (range queries) ----
+				scanStart := time.Now()
+				var scanned int
+				rng = mathrand.New(mathrand.NewPCG(7, 7))
+				for i := 0; i < numScans; i++ {
+					start := uint64(rng.IntN(totalOps - scanSize))
+					it := engine.Scan(uint64Key(start), uint64Key(start+scanSize))
+					for it.Next() {
+						scanned++
+					}
+				}
+				scanDur := time.Since(scanStart)
+
+				engine.Close()
+
+				b.Logf("writes=%v (%d puts+%d dels, %d/s) | gets=%v (%d ops/s) | scans=%v (%d rows/s) | flushes=%d compactions=%d L0=%d/%s L1=%d/%s",
+					writeDur, totalOps-deletes, deletes,
+					int(float64(totalOps)/writeDur.Seconds()),
+					getDur, int(float64(numGets)/getDur.Seconds()),
+					scanDur, int(float64(scanned)/scanDur.Seconds()),
+					stats.FlushCount, stats.CompactionCount,
+					stats.L0SSTs, formatBytes(stats.L0Bytes),
+					stats.L1SSTs, formatBytes(stats.L1Bytes))
+			}
+		})
+
+		b.Run(fmt.Sprintf("%d/Pebble", totalOps), func(b *testing.B) {
+			for iter := 0; iter < b.N; iter++ {
+				db := initPebble(b)
+
+				writeStart := time.Now()
+				var deletes int
+				for idx := 0; idx < totalOps; idx++ {
+					if idx > 1000 && idx%deleteRate == 0 {
+						target := uint64(idx - 1 - mathrand.IntN(100))
+						db.Delete(uint64Key(target), pebble.NoSync)
+						deletes++
+					} else {
+						db.Set(uint64Key(uint64(idx)), nextVal(idx), pebble.NoSync)
+					}
+				}
+				writeDur := time.Since(writeStart)
+				m := db.Metrics()
+
+				getStart := time.Now()
+				rng := mathrand.New(mathrand.NewPCG(42, 42))
+				for i := 0; i < numGets; i++ {
+					k := uint64(rng.IntN(totalOps))
+					v, closer, err := db.Get(uint64Key(k))
+					if err == nil {
+						_ = v
+						closer.Close()
+					}
+				}
+				getDur := time.Since(getStart)
+
+				scanStart := time.Now()
+				var scanned int
+				rng = mathrand.New(mathrand.NewPCG(7, 7))
+				for i := 0; i < numScans; i++ {
+					start := uint64(rng.IntN(totalOps - scanSize))
+					it, _ := db.NewIter(&pebble.IterOptions{
+						LowerBound: uint64Key(start),
+						UpperBound: uint64Key(start + scanSize),
+					})
+					for it.First(); it.Valid(); it.Next() {
+						scanned++
+					}
+					it.Close()
+				}
+				scanDur := time.Since(scanStart)
+
+				db.Close()
+
+				var totalSSTs int
+				var totalBytes uint64
+				var perLevel []string
+				for lvl, lm := range m.Levels {
+					if lm.NumFiles == 0 {
+						continue
+					}
+					totalSSTs += int(lm.NumFiles)
+					totalBytes += uint64(lm.Size)
+					perLevel = append(perLevel, fmt.Sprintf("L%d=%d/%s", lvl, lm.NumFiles, formatBytes(lm.Size)))
+				}
+				b.Logf("writes=%v (%d puts+%d dels, %d/s) | gets=%v (%d ops/s) | scans=%v (%d rows/s) | flushes=%d compactions=%d %s total=%d/%s",
+					writeDur, totalOps-deletes, deletes,
+					int(float64(totalOps)/writeDur.Seconds()),
+					getDur, int(float64(numGets)/getDur.Seconds()),
+					scanDur, int(float64(scanned)/scanDur.Seconds()),
+					m.Flush.Count, m.Compact.Count,
+					strings.Join(perLevel, " "),
+					totalSSTs, formatBytes(int64(totalBytes)))
+			}
+		})
+	}
+}
+
 // TestCompactionOverTime measures how compaction cost grows as L1 gets larger.
 // Not a benchmark (uses t.Log) because we want to observe the progression,
 // not a single averaged number.
@@ -823,7 +1047,7 @@ func TestCompactionOverTime(t *testing.T) {
 	// Disable auto-compaction so we control when it happens.
 	engine.SetPolicy(&protodb.Policy{
 		FlushThreshold:      1024 * 1024 * 64, // 64MB — won't trigger auto-flush
-		CompactionThreshold: 1000,             // effectively disable auto-compact
+		SoftCompactionTheshold: 1000,             // effectively disable auto-compact
 	})
 
 	const batchSize = 10000 // entries per flush (~1.2MB per batch)
@@ -858,12 +1082,11 @@ func TestCompactionOverTime(t *testing.T) {
 		}
 		getDur := since(getStart) / 100
 
-		// Count L1 state
-		l1SSTs, l1Size := engine.L1Stats()
+		s := engine.Stats()
 
 		if round < 20 || round%10 == 9 {
 			t.Logf("%-8d  %-12d  %-12s  %-10.1f  %-10d",
-				round+1, l1SSTs, formatBytes(l1Size), float64(compactDur.Microseconds())/1000.0, getDur.Nanoseconds())
+				round+1, s.L1SSTs, formatBytes(s.L1Bytes), float64(compactDur.Microseconds())/1000.0, getDur.Nanoseconds())
 		}
 	}
 }
@@ -873,7 +1096,8 @@ func BenchmarkBlockSize(b *testing.B) {
 	val := mustMarshal(b, makeItem(0))
 	const populateSize = 10000
 
-	for _, blockSize := range []int{3800, 4096, 32768} {
+	// BlockSize must keep entry count ≤ maxBlockEntries (342). Sweep around 4KB.
+	for _, blockSize := range []int{3800, 4096} {
 		b.Run(fmt.Sprintf("Flush1000/Block_%d", blockSize), func(b *testing.B) {
 			protodb.BlockSize = blockSize
 			defer func() { protodb.BlockSize = 4096 }()
@@ -1084,7 +1308,7 @@ func TestCompressionRatio(t *testing.T) {
 	engine, _ := protodb.Open(dir)
 	engine.SetPolicy(&protodb.Policy{
 		FlushThreshold:      1024 * 1024 * 64,
-		CompactionThreshold: 1000,
+		SoftCompactionTheshold: 1000,
 	})
 
 	const entries = 100_000
@@ -1124,7 +1348,7 @@ func TestCompressionRatioRandom(t *testing.T) {
 	engine, _ := protodb.Open(dir)
 	engine.SetPolicy(&protodb.Policy{
 		FlushThreshold:      1024 * 1024 * 64,
-		CompactionThreshold: 1000,
+		SoftCompactionTheshold: 1000,
 	})
 
 	const entries = 100_000
