@@ -155,22 +155,21 @@ func (wal *WAL) maybeSync() error {
 }
 
 func (batch *WALBatch) Commit() error {
+	wal := batch.wal
 	data := batch.buf.Bytes()
-	batch.wal.buf.Write(data)
-	writeU32(&batch.wal.buf, 0)
-	writeU32(&batch.wal.buf, commitKeyLen)
-	batch.wal.unsyncedBytes += len(data) + 8
+	wal.buf.Write(data)
+	writeU32(&wal.buf, 0)
+	writeU32(&wal.buf, commitKeyLen)
+	wal.unsyncedBytes += len(data) + 8
 
-	err := batch.wal.maybeFlush()
+	err := wal.maybeFlush()
 	if err != nil {
 		return err
 	}
-
-	err = batch.wal.maybeSync()
+	err = wal.maybeSync()
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 

@@ -95,6 +95,7 @@ type sst struct {
 	path       string
 	fileSize   int64
 	firstKey   Key
+	lastKey    Key
 }
 
 type reader interface {
@@ -274,6 +275,7 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 			path:     finalPath,
 			fileSize: int64(buffer.Len()),
 			firstKey: blocks[0].FirstKey,
+			lastKey:  lastKey,
 		})
 
 		// Reset for next SST
@@ -405,7 +407,7 @@ func ReadSST(path string, hash string, options *ReaderOptions) (*sst, error) {
 		firstKey = blocks[0].FirstKey
 	}
 
-	return &sst{
+	s := &sst{
 		cache:    newLRU[uint64, sstBlock](128, nil),
 		blocks:   blocks,
 		footer:   footer,
@@ -413,7 +415,45 @@ func ReadSST(path string, hash string, options *ReaderOptions) (*sst, error) {
 		path:     path,
 		fileSize: fileSize,
 		firstKey: firstKey,
-	}, nil
+	}
+
+	// Populate the lastKey by readin the last block
+	if len(blocks) > 0 {
+		last := blocks[len(blocks)-1]
+		compressed := make([]byte, last.Length)
+		_, err := file.ReadAt(compressed, int64(last.Offset))
+
+		if err != nil {
+			return nil, err
+		}
+
+		data, err := snappy.Decode(nil, compressed)
+
+		if err != nil {
+			return nil, err
+		} else if int64(len(data)) < blockFooterSize {
+			return nil, ErrCorrupted
+		}
+
+		stored := binary.BigEndian.Uint32(data[len(data)-4:])
+
+		if crc32.ChecksumIEEE(data[:len(data)-4]) != stored {
+			return nil, ErrCorrupted
+		}
+
+		end := int64(len(data)) - blockFooterSize
+		var pos int64
+		for pos < end {
+			key, _, entrySize, err := readEntry(data, pos)
+			if err != nil {
+				break
+			}
+			s.lastKey = key
+			pos += entrySize
+		}
+	}
+
+	return s, nil
 }
 
 func (s *sst) GetBlock(blockIndex uint64, reader reader) (*sstBlock, error) {

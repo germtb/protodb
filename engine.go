@@ -15,6 +15,7 @@ type Policy struct {
 	SoftCompactionThreshold int
 	HardCompactionThreshold int
 	FlushThreshold          int
+	Sync                    bool
 }
 
 type Engine struct {
@@ -471,7 +472,7 @@ func (e *Engine) Scan(lo, hi Key) Iterator {
 	copy(l1ssts, e.l1ssts)
 	e.flushMutex.Unlock()
 
-	return e.scan(lo, hi, memtable, l0ssts, l1ssts)
+	return skipTombstones(e.scan(lo, hi, memtable, l0ssts, l1ssts))
 }
 
 func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts []*sst) Iterator {
@@ -589,75 +590,56 @@ func (e *Engine) compactLocked() error {
 	copy(l1ssts, e.l1ssts)
 	e.flushMutex.Unlock()
 
-	l0Entries := e.scan(nil, nil, nil, l0ssts, nil)
+	originalL1ssts := slices.Clone(l1ssts)
 
-	var new_ssts []*sst
+	anyRewrite := false
 
-	if len(l1ssts) == 0 {
-		// L1 is bottom: tombstones have nothing to shadow below, drop them.
-		written_ssts, err := WriteSST(e.ObjectsPath(), l0Entries, false)
+	for idx := len(l0ssts) - 1; idx >= 0; idx-- {
+		l0 := l0ssts[idx]
+
+		// L1 is sorted + non-overlapping → overlapping range is contiguous.
+		first, last := -1, -1
+		for i, l1 := range l1ssts {
+			if bytes.Compare(l1.firstKey, l0.lastKey) > 0 {
+				break // l1 has passed l0
+			}
+			if l1.lastKey != nil && bytes.Compare(l1.lastKey, l0.firstKey) < 0 {
+				continue // l1 still before l0
+			}
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+
+		if first < 0 {
+			// No overlap — find insertion position and splice l0 in.
+			pos := sort.Search(len(l1ssts), func(i int) bool {
+				return bytes.Compare(l1ssts[i].firstKey, l0.firstKey) > 0
+			})
+			l1ssts = slices.Insert(l1ssts, pos, l0)
+			continue
+		}
+
+		// Merge l0 with all of l1ssts[first:last+1].
+		merged := e.scan(nil, nil, nil, []*sst{l0}, l1ssts[first:last+1])
+		written, err := WriteSST(e.ObjectsPath(), merged, false)
+		merged.Close()
 		if err != nil {
 			return err
 		}
-		new_ssts = append(new_ssts, written_ssts...)
-	} else {
-		entries := make([]KeyValue, 0)
-		l1Index := 0
-
-		finishRange := func() error {
-			// There is no overlap between l0 and l1, we can keep the old l1 sst
-			if len(entries) == 0 {
-				new_ssts = append(new_ssts, l1ssts[l1Index])
-			} else {
-				handle, err := e.fileTable.getOrOpen(l1ssts[l1Index].path)
-				if err != nil {
-					return err
-				}
-				l0Range := iter(entries)
-				l1Range := l1ssts[l1Index].Iterator(nil, nil, handle)
-				// Merge preserves tombstones so newer L0 deletions shadow older
-				// L1 values; WriteSST(false) drops them at the bottom level.
-				mergedRange := newMergeIterator([]Iterator{l0Range, l1Range})
-				rangeSsts, err := WriteSST(e.ObjectsPath(), mergedRange, false)
-				handle.Close()
-				if err != nil {
-					return err
-				}
-				new_ssts = append(new_ssts, rangeSsts...)
-			}
-
-			entries = entries[:0]
-			l1Index++
-			return nil
-		}
-
-		for l0Entries.Next() {
-			entry := l0Entries.Current()
-			key := entry.Key
-			value := entry.Value
-
-			for l1Index+1 < len(l1ssts) && bytes.Compare(key, l1ssts[l1Index+1].firstKey) >= 0 {
-				err := finishRange()
-				if err != nil {
-					return err
-				}
-			}
-
-			entries = append(entries, KeyValue{Key: key, Value: value})
-		}
-
-		for l1Index < len(l1ssts) {
-			err := finishRange()
-			if err != nil {
-				return err
-			}
-		}
+		anyRewrite = true
+		l1ssts = slices.Replace(l1ssts, first, last+1, written...)
 	}
 
-	// Commit SST renames (and their content, via FS ordering) before the
-	// manifests reference them.
-	if err := syncDir(e.ObjectsPath()); err != nil {
-		return err
+	new_ssts := l1ssts
+
+	// Only sync when there has been a write
+	if anyRewrite {
+		err := syncDir(e.ObjectsPath())
+		if err != nil {
+			return err
+		}
 	}
 
 	e.flushMutex.Lock()
@@ -671,7 +653,8 @@ func (e *Engine) compactLocked() error {
 	// outcome is "only L1 landed" — reads from L0 still shadow L1 correctly
 	// with the same values. "L0 without L1" cannot happen because fd writes
 	// preserve offset order.
-	if err := e.manifest.Update(levelL1, new_l1_ssts); err != nil {
+	err := e.manifest.Update(levelL1, new_l1_ssts)
+	if err != nil {
 		return err
 	}
 
@@ -688,7 +671,6 @@ func (e *Engine) compactLocked() error {
 		return err
 	}
 
-	// Delete orphaned ssts
 	kept := func(hash string) bool {
 		for _, s := range new_ssts {
 			if s.hash == hash {
@@ -697,7 +679,7 @@ func (e *Engine) compactLocked() error {
 		}
 		return false
 	}
-	for _, oldSST := range l1ssts {
+	for _, oldSST := range originalL1ssts {
 		if !kept(oldSST.hash) {
 			_ = os.Remove(oldSST.path)
 		}
@@ -838,6 +820,12 @@ func (tx *Transaction) Commit() error {
 	err := batch.Commit()
 	if err != nil {
 		return err
+	}
+
+	if tx.engine.policy.Sync {
+		if err := tx.engine.wal.sync(); err != nil {
+			return err
+		}
 	}
 
 	// WAL is durable — only now is it safe to make the writes visible.

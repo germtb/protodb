@@ -4,19 +4,16 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
-func entriesFrom(entries []KeyValue) *sliceIterator {
-	return &sliceIterator{entries: entries, index: -1}
-}
-
 func writeTestSST(t *testing.T, pairs []KeyValue) (*sst, string) {
 	t.Helper()
 	dir := t.TempDir()
-	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
+	ssts, err := WriteSST(dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +47,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		{key(3), []byte("foo")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
+	ssts, err := WriteSST(dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +78,7 @@ func TestEmptySST(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []KeyValue{}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
+	ssts, err := WriteSST(dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +135,7 @@ func TestCustomTailSize(t *testing.T) {
 		{key(3), []byte("ccc")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
+	ssts, err := WriteSST(dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +241,7 @@ func TestWriteUnsortedKeysError(t *testing.T) {
 		{key(3), []byte("c")},
 		{key(1), []byte("a")},
 	}
-	_, err := WriteSST(dir, entriesFrom(pairs), true)
+	_, err := WriteSST(dir, iter(pairs), true)
 	if !errors.Is(err, ErrUnsortedKeys) {
 		t.Fatalf("expected ErrUnsortedKeys, got %v", err)
 	}
@@ -256,7 +253,7 @@ func TestWriteDuplicateKeysError(t *testing.T) {
 		{key(1), []byte("a")},
 		{key(1), []byte("b")},
 	}
-	_, err := WriteSST(dir, entriesFrom(pairs), true)
+	_, err := WriteSST(dir, iter(pairs), true)
 	if !errors.Is(err, ErrUnsortedKeys) {
 		t.Fatalf("expected ErrUnsortedKeys, got %v", err)
 	}
@@ -283,7 +280,7 @@ func TestReadBadVersionError(t *testing.T) {
 	pairs := []KeyValue{
 		{key(1), []byte("x")},
 	}
-	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
+	ssts, err := WriteSST(dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -791,4 +788,49 @@ func TestTombstoneBetweenEmptyValues(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("Get(3): got len %d, want 0", len(got))
 	}
+}
+
+// TestGetCorruptedKeyLenNoPanic verifies that sst.Get returns ErrCorrupted
+// instead of panicking when a CRC-valid block has a corrupt keyLen that
+// would slice past the block boundary.
+func TestGetCorruptedKeyLenNoPanic(t *testing.T) {
+	// Build a minimal block by hand: one "entry" with keyLen = 0x7FFFFFFF,
+	// then a valid footer + CRC over the corrupted data.
+	var buf bytes.Buffer
+
+	// Fake entry: keyLen pointing way past the block
+	writeU32(&buf, 0x7FFFFFFF) // keyLen = 2 billion
+	writeU32(&buf, 0)          // valLen = 0
+	writeU32(&buf, 0xFFFFFFFF) // left/right = noChild
+
+	// Footer: rootOffset = 0, entryCount = 1
+	writeU16(&buf, 0)
+	writeU16(&buf, 1)
+	// CRC over everything before this point
+	writeU32(&buf, testCRC(buf.Bytes()))
+
+	data := buf.Bytes()
+
+	// Inject into an sst's block cache so Get uses it directly
+	s := &sst{
+		cache:  newLRU[uint64, sstBlock](128, nil),
+		blocks: []sstBlockIndex{{FirstKey: key(0), Offset: 0, Length: uint32(len(data))}},
+	}
+	s.cache.Put(0, sstBlock{data: data})
+
+	// This must not panic — should return an error
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Get panicked on corrupted keyLen: %v", r)
+		}
+	}()
+
+	_, err := s.Get(key(0), nil)
+	if err == nil {
+		t.Fatal("expected error for corrupted block, got nil")
+	}
+}
+
+func testCRC(data []byte) uint32 {
+	return crc32.ChecksumIEEE(data)
 }

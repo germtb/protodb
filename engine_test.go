@@ -978,8 +978,10 @@ func TestCompactAfterMultipleFlushes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(engine.l1ssts) != 1 {
-		t.Fatalf("expected 1 SST after compact, got %d", len(engine.l1ssts))
+	// Each L0 SST holds a distinct non-overlapping key, so compaction
+	// trivial-moves each one to L1 without merging — 3 L1 SSTs.
+	if len(engine.l1ssts) != 3 {
+		t.Fatalf("expected 3 SSTs after compact, got %d", len(engine.l1ssts))
 	}
 
 	for k, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
@@ -2051,9 +2053,10 @@ func TestCompactMultipleCyclesCleanup(t *testing.T) {
 		}
 	}
 
-	// Without GC, old SST files accumulate. Just verify the engine has the right number of SSTs in memory.
-	if len(engine.l1ssts) != 1 {
-		t.Errorf("expected 1 SST in engine after compactions, got %d", len(engine.l1ssts))
+	// Each cycle writes a distinct non-overlapping key, so trivial move
+	// promotes the L0 SST to L1 without merging — one L1 SST per cycle.
+	if len(engine.l1ssts) != 3 {
+		t.Errorf("expected 3 SSTs in engine after compactions, got %d", len(engine.l1ssts))
 	}
 }
 
@@ -2223,8 +2226,10 @@ func TestCompactLargeDataSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(engine.l1ssts) != 1 {
-		t.Fatalf("expected 1 SST after compact, got %d", len(engine.l1ssts))
+	// Each L0 SST holds a distinct non-overlapping key range (100*batch to
+	// 100*batch+99), so compaction trivial-moves each one to L1 — 10 L1 SSTs.
+	if len(engine.l1ssts) != 10 {
+		t.Fatalf("expected 10 SSTs after compact, got %d", len(engine.l1ssts))
 	}
 
 	// Verify all keys
@@ -2332,7 +2337,6 @@ func TestFlushFailsOnUnwritableDir(t *testing.T) {
 	}
 }
 
-
 // SST Scan silently handles a deleted SST file (yields no results).
 func TestSSTScanAfterFileDeleted(t *testing.T) {
 	dir := t.TempDir()
@@ -2341,7 +2345,7 @@ func TestSSTScanAfterFileDeleted(t *testing.T) {
 		{key(2), []byte("b")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
+	ssts, err := WriteSST(dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2390,7 +2394,7 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 		{key(3), []byte("cccccccccc")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
+	ssts, err := WriteSST(dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2421,7 +2425,7 @@ func TestSSTGetTruncatedFile(t *testing.T) {
 		{key(1), []byte("hello world")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
+	ssts, err := WriteSST(dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2449,14 +2453,14 @@ func TestReadSSTCorruptedFooterCount(t *testing.T) {
 		{key(1), []byte("x")},
 	}
 
-	ssts, err := WriteSST(dir, entriesFrom(pairs), true)
+	ssts, err := WriteSST(dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	hash := ssts[0].hash
 
 	// Overwrite the count field in the footer with a huge value.
-	// Footer layout: BlockIndexSize(8) + BlockCount(8) + Version(2) = 18 bytes.
+	// Footer layout: LastKeySectionSize(4) + BlockIndexSize(8) + BlockCount(8) + Version(2) = 22 bytes.
 	// BlockCount starts at footerSize-10 from end of file.
 	sstPath := filepath.Join(dir, hash)
 	info, _ := os.Stat(sstPath)
@@ -2541,7 +2545,7 @@ func TestWriteSSTFailsOnBadDir(t *testing.T) {
 	blocker := filepath.Join(dir, "blocker")
 	os.WriteFile(blocker, []byte("x"), 0644)
 
-	entries := entriesFrom([]KeyValue{
+	entries := iter([]KeyValue{
 		{key(1), []byte("a")},
 	})
 
@@ -3234,9 +3238,9 @@ func TestAdversarialScanComplexMerge(t *testing.T) {
 		vals = append(vals, string(val))
 	}
 
-	// Scan surfaces tombstones (value == nil); callers filter if desired.
-	expectedKeys := []Key{key(1), key(2), key(3), key(4), key(5), key(6), key(7)}
-	expectedVals := []string{"sst1-1", "sst2-2", "", "sst2-4", "mem-5", "sst2-6", "mem-7"}
+	// Public Scan filters tombstones — key(3) was Deleted and must not appear.
+	expectedKeys := []Key{key(1), key(2), key(4), key(5), key(6), key(7)}
+	expectedVals := []string{"sst1-1", "sst2-2", "sst2-4", "mem-5", "sst2-6", "mem-7"}
 
 	if len(keys) != len(expectedKeys) {
 		t.Fatalf("Scan: got %d entries, want %d", len(keys), len(expectedKeys))
@@ -3379,7 +3383,6 @@ func TestAdversarialFlushFailureRecovery(t *testing.T) {
 		t.Errorf("Get(1) after successful flush: got %q, want %q", got, "a")
 	}
 }
-
 
 // Key 0 through the entire lifecycle.
 func TestAdversarialKeyZeroLifecycle(t *testing.T) {
@@ -4547,15 +4550,15 @@ func TestCorruptedBlockChecksumOnGet(t *testing.T) {
 	}
 
 	sstPath := engine.l1ssts[0].path
+	blockEnd := int(engine.l1ssts[0].blocks[0].Offset + uint64(engine.l1ssts[0].blocks[0].Length))
 	engine.Close()
 
-	// Corrupt a byte in the middle of the SST file (inside a data block)
+	// Corrupt a byte inside the first data block
 	data, err := os.ReadFile(sstPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mid := len(data) / 2
-	data[mid] ^= 0xFF
+	data[blockEnd-1] ^= 0xFF
 	if err := os.WriteFile(sstPath, data, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -4592,15 +4595,15 @@ func TestCorruptedBlockChecksumOnScan(t *testing.T) {
 	}
 
 	sstPath := engine.l1ssts[0].path
+	blockEnd := int(engine.l1ssts[0].blocks[0].Offset + uint64(engine.l1ssts[0].blocks[0].Length))
 	engine.Close()
 
-	// Corrupt a byte in the data block area
+	// Corrupt a byte inside the first data block
 	data, err := os.ReadFile(sstPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mid := len(data) / 2
-	data[mid] ^= 0xFF
+	data[blockEnd-1] ^= 0xFF
 	if err := os.WriteFile(sstPath, data, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -4740,8 +4743,7 @@ func TestSSTWithValidFooterButCorruptedBlockIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The footer is the last sstFooterSize bytes.
-	// Read the block index size from the footer (first 8 bytes of footer).
+	// Footer layout: BlockIndexSize(u64) | BlockCount(u64) | Version(u16)
 	footerStart := len(data) - int(sstFooterSize)
 	blockIdxSize := binary.BigEndian.Uint64(data[footerStart : footerStart+8])
 	blockIndexStart := footerStart - int(blockIdxSize)

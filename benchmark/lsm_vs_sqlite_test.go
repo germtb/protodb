@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -93,9 +95,24 @@ func poolKey(idx int) []byte {
 	return keyPool[idx%len(keyPool)]
 }
 
+// pebbleOptionsMatched returns a Pebble config tuned to match our engine:
+// - 64MB memtable (vs Pebble's 4MB default) so flush cadence is comparable.
+// - BytesPerSync=0 to disable the periodic sync_file_range hint during SST
+//   writes. On Linux the default 512KB hint isn't a durability fsync — it
+//   only tells the kernel to start write-back — but we disable it so both
+//   engines do zero background I/O pressure during the write path.
+// - WALBytesPerSync=0 to disable background WAL sync (already the default).
+func pebbleOptionsMatched() *pebble.Options {
+	return &pebble.Options{
+		MemTableSize:    64 * 1024 * 1024,
+		BytesPerSync:    0,
+		WALBytesPerSync: 0,
+	}
+}
+
 func initPebble(b *testing.B) *pebble.DB {
 	b.Helper()
-	db, err := pebble.Open(filepath.Join(b.TempDir(), "pebble"), &pebble.Options{})
+	db, err := pebble.Open(filepath.Join(b.TempDir(), "pebble"), pebbleOptionsMatched())
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -104,7 +121,7 @@ func initPebble(b *testing.B) *pebble.DB {
 
 func initPebbleT(t *testing.T) *pebble.DB {
 	t.Helper()
-	db, err := pebble.Open(filepath.Join(t.TempDir(), "pebble"), &pebble.Options{})
+	db, err := pebble.Open(filepath.Join(t.TempDir(), "pebble"), pebbleOptionsMatched())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +786,7 @@ func BenchmarkCompaction(b *testing.B) {
 	}
 	nextVal := func(i int) []byte { return pool[i%poolSize] }
 
-	for _, entryCount := range []int{1000, 10000, 100000} {
+	for _, entryCount := range []int{10, 100, 1000, 10000, 100000} {
 		b.Run(fmt.Sprintf("%d/LSM", entryCount), func(b *testing.B) {
 			for iter := 0; iter < b.N; iter++ {
 				b.StopTimer()
@@ -814,6 +831,232 @@ func BenchmarkCompaction(b *testing.B) {
 
 				b.StartTimer()
 				db.Compact(uint64Key(0), uint64Key(uint64(entryCount)), true)
+				b.StopTimer()
+				db.Close()
+			}
+		})
+	}
+}
+
+// BenchmarkConcurrentWrites runs `totalOps` writes split across N goroutines.
+// Exposes Pebble's concurrent commit pipeline (batches share the WAL write
+// lane via a lock-free pending queue) vs our single flushMutex serialization.
+// Each goroutine writes distinct, non-overlapping key ranges so there's no
+// key contention — only engine-level commit contention.
+func BenchmarkConcurrentWrites(b *testing.B) {
+	const totalOps = 500_000
+	const poolSize = 64
+	const minSize, maxSize = 100, 2000
+	pool := make([][]byte, poolSize)
+	for i := range pool {
+		sz := minSize + i*(maxSize-minSize)/(poolSize-1)
+		pool[i] = make([]byte, sz)
+		rand.Read(pool[i])
+	}
+	nextVal := func(i int) []byte { return pool[i%poolSize] }
+
+	for _, writers := range []int{1, 2, 4, 8, 16} {
+		b.Run(fmt.Sprintf("%dw/LSM", writers), func(b *testing.B) {
+			for iter := 0; iter < b.N; iter++ {
+				b.StopTimer()
+				engine := initLSM(b)
+				opsPerWriter := totalOps / writers
+				var wg sync.WaitGroup
+				b.StartTimer()
+				for w := 0; w < writers; w++ {
+					wg.Add(1)
+					go func(base int) {
+						defer wg.Done()
+						for i := 0; i < opsPerWriter; i++ {
+							idx := base + i
+							engine.Put(uint64Key(uint64(idx)), nextVal(idx))
+						}
+					}(w * opsPerWriter)
+				}
+				wg.Wait()
+				b.StopTimer()
+				engine.Close()
+			}
+		})
+
+		b.Run(fmt.Sprintf("%dw/Pebble", writers), func(b *testing.B) {
+			for iter := 0; iter < b.N; iter++ {
+				b.StopTimer()
+				db := initPebble(b)
+				opsPerWriter := totalOps / writers
+				var wg sync.WaitGroup
+				b.StartTimer()
+				for w := 0; w < writers; w++ {
+					wg.Add(1)
+					go func(base int) {
+						defer wg.Done()
+						for i := 0; i < opsPerWriter; i++ {
+							idx := base + i
+							db.Set(uint64Key(uint64(idx)), nextVal(idx), pebble.NoSync)
+						}
+					}(w * opsPerWriter)
+				}
+				wg.Wait()
+				b.StopTimer()
+				db.Close()
+			}
+		})
+	}
+}
+
+// initLSMSync returns an Engine with per-commit fsync enabled. Matches the
+// durability contract of pebble.WriteOptions{Sync: true}.
+func initLSMSync(b *testing.B) *protodb.Engine {
+	b.Helper()
+	engine, err := protodb.Open(b.TempDir())
+	if err != nil {
+		b.Fatal(err)
+	}
+	engine.SetPolicy(&protodb.Policy{
+		SoftCompactionThreshold: 4,
+		HardCompactionThreshold: 16,
+		FlushThreshold:          1024 * 1024 * 64,
+		Sync:                    true,
+	})
+	return engine
+}
+
+// BenchmarkConcurrentWritesSync mirrors BenchmarkConcurrentWrites but with
+// per-commit fsync on both sides. This is the durability contract most
+// production databases need — CockroachDB's Raft log uses Sync:true to
+// acknowledge writes. Pebble's commit pipeline is designed exactly for this
+// case: one fsync amortized across many concurrent batches.
+func BenchmarkConcurrentWritesSync(b *testing.B) {
+	const totalOps = 1_000 // fsync is ~1-5ms each — keep small
+	const poolSize = 64
+	const minSize, maxSize = 100, 2000
+	pool := make([][]byte, poolSize)
+	for i := range pool {
+		sz := minSize + i*(maxSize-minSize)/(poolSize-1)
+		pool[i] = make([]byte, sz)
+		rand.Read(pool[i])
+	}
+	nextVal := func(i int) []byte { return pool[i%poolSize] }
+
+	syncOpts := &pebble.WriteOptions{Sync: true}
+
+	for _, writers := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("%dw/LSM", writers), func(b *testing.B) {
+			for iter := 0; iter < b.N; iter++ {
+				b.StopTimer()
+				engine := initLSMSync(b)
+				opsPerWriter := totalOps / writers
+				var wg sync.WaitGroup
+				b.StartTimer()
+				for w := 0; w < writers; w++ {
+					wg.Add(1)
+					go func(base int) {
+						defer wg.Done()
+						for i := 0; i < opsPerWriter; i++ {
+							idx := base + i
+							engine.Put(uint64Key(uint64(idx)), nextVal(idx))
+						}
+					}(w * opsPerWriter)
+				}
+				wg.Wait()
+				b.StopTimer()
+				engine.Close()
+			}
+		})
+
+		b.Run(fmt.Sprintf("%dw/Pebble", writers), func(b *testing.B) {
+			for iter := 0; iter < b.N; iter++ {
+				b.StopTimer()
+				db := initPebble(b)
+				opsPerWriter := totalOps / writers
+				var wg sync.WaitGroup
+				b.StartTimer()
+				for w := 0; w < writers; w++ {
+					wg.Add(1)
+					go func(base int) {
+						defer wg.Done()
+						for i := 0; i < opsPerWriter; i++ {
+							idx := base + i
+							db.Set(uint64Key(uint64(idx)), nextVal(idx), syncOpts)
+						}
+					}(w * opsPerWriter)
+				}
+				wg.Wait()
+				b.StopTimer()
+				db.Close()
+			}
+		})
+	}
+}
+
+// BenchmarkConcurrentBatchedWrites runs the same total ops as
+// BenchmarkConcurrentWrites, but each goroutine commits in batches of 100
+// puts. Pebble's commit pipeline is designed to amortize seqnum/WAL/publish
+// coordination across many ops per commit — this is where it should shine.
+func BenchmarkConcurrentBatchedWrites(b *testing.B) {
+	const totalOps = 500_000
+	const batchSize = 100
+	const poolSize = 64
+	const minSize, maxSize = 100, 2000
+	pool := make([][]byte, poolSize)
+	for i := range pool {
+		sz := minSize + i*(maxSize-minSize)/(poolSize-1)
+		pool[i] = make([]byte, sz)
+		rand.Read(pool[i])
+	}
+	nextVal := func(i int) []byte { return pool[i%poolSize] }
+
+	for _, writers := range []int{1, 2, 4, 8, 16} {
+		b.Run(fmt.Sprintf("%dw/LSM", writers), func(b *testing.B) {
+			for iter := 0; iter < b.N; iter++ {
+				b.StopTimer()
+				engine := initLSM(b)
+				opsPerWriter := totalOps / writers
+				var wg sync.WaitGroup
+				b.StartTimer()
+				for w := 0; w < writers; w++ {
+					wg.Add(1)
+					go func(base int) {
+						defer wg.Done()
+						for i := 0; i < opsPerWriter; i += batchSize {
+							tx := engine.Transaction()
+							for k := 0; k < batchSize && i+k < opsPerWriter; k++ {
+								idx := base + i + k
+								tx.Put(uint64Key(uint64(idx)), nextVal(idx))
+							}
+							tx.Commit()
+						}
+					}(w * opsPerWriter)
+				}
+				wg.Wait()
+				b.StopTimer()
+				engine.Close()
+			}
+		})
+
+		b.Run(fmt.Sprintf("%dw/Pebble", writers), func(b *testing.B) {
+			for iter := 0; iter < b.N; iter++ {
+				b.StopTimer()
+				db := initPebble(b)
+				opsPerWriter := totalOps / writers
+				var wg sync.WaitGroup
+				b.StartTimer()
+				for w := 0; w < writers; w++ {
+					wg.Add(1)
+					go func(base int) {
+						defer wg.Done()
+						for i := 0; i < opsPerWriter; i += batchSize {
+							batch := db.NewBatch()
+							for k := 0; k < batchSize && i+k < opsPerWriter; k++ {
+								idx := base + i + k
+								batch.Set(uint64Key(uint64(idx)), nextVal(idx), nil)
+							}
+							batch.Commit(pebble.NoSync)
+							batch.Close()
+						}
+					}(w * opsPerWriter)
+				}
+				wg.Wait()
 				b.StopTimer()
 				db.Close()
 			}
@@ -1387,3 +1630,173 @@ func TestCompressionRatioRandom(t *testing.T) {
 	t.Logf("On disk:     %s", formatBytes(totalSize))
 	t.Logf("Ratio:       %.2fx", float64(rawSize)/float64(totalSize))
 }
+
+// BenchmarkReadWriteContention measures read throughput under concurrent write
+// pressure. Populates a database, then runs N reader goroutines alongside M
+// writer goroutines for a fixed duration. Reports read ops/sec and write ops/sec
+// separately, exposing how write-side locking affects read latency.
+func BenchmarkReadWriteContention(b *testing.B) {
+	const populateSize = 100_000
+	const duration = 2 * time.Second
+
+	const poolSize = 64
+	const minSize, maxSize = 100, 2000
+	valPool := make([][]byte, poolSize)
+	for i := range valPool {
+		sz := minSize + i*(maxSize-minSize)/(poolSize-1)
+		valPool[i] = make([]byte, sz)
+		rand.Read(valPool[i])
+	}
+	nextVal := func(i int) []byte { return valPool[i%poolSize] }
+
+	type result struct {
+		readOps  int64
+		writeOps int64
+	}
+
+	for _, readers := range []int{1, 4, 8} {
+		for _, writers := range []int{0, 1, 4} {
+			tag := fmt.Sprintf("%dr_%dw", readers, writers)
+
+			b.Run(tag+"/LSM", func(b *testing.B) {
+				for iter := 0; iter < b.N; iter++ {
+					b.StopTimer()
+					engine := initLSM(b)
+					for idx := 0; idx < populateSize; idx++ {
+						engine.Put(uint64Key(uint64(idx)), nextVal(idx))
+					}
+					engine.Flush()
+					engine.Compact()
+
+					var readOps, writeOps int64
+					var wg sync.WaitGroup
+					stop := make(chan struct{})
+
+					// Readers: point Gets on existing keys
+					for reader := 0; reader < readers; reader++ {
+						wg.Add(1)
+						go func(seed int) {
+							defer wg.Done()
+							rng := mathrand.New(mathrand.NewPCG(uint64(seed), uint64(seed+1)))
+							var ops int64
+							for {
+								select {
+								case <-stop:
+									atomic.AddInt64(&readOps, ops)
+									return
+								default:
+									key := uint64(rng.IntN(populateSize))
+									engine.Get(uint64Key(key))
+									ops++
+								}
+							}
+						}(reader * 2)
+					}
+
+					// Writers: sequential Puts to new keys (past populateSize)
+					for writer := 0; writer < writers; writer++ {
+						wg.Add(1)
+						go func(base int) {
+							defer wg.Done()
+							var ops int64
+							idx := base
+							for {
+								select {
+								case <-stop:
+									atomic.AddInt64(&writeOps, ops)
+									return
+								default:
+									engine.Put(uint64Key(uint64(populateSize+idx)), nextVal(idx))
+									idx += writers // stride to avoid key overlap
+									ops++
+								}
+							}
+						}(writer)
+					}
+
+					b.StartTimer()
+					time.Sleep(duration)
+					close(stop)
+					wg.Wait()
+					b.StopTimer()
+
+					b.Logf("reads=%d (%d/s) writes=%d (%d/s)",
+						readOps, readOps/int64(duration.Seconds()),
+						writeOps, writeOps/int64(duration.Seconds()))
+					engine.Close()
+				}
+			})
+
+			b.Run(tag+"/Pebble", func(b *testing.B) {
+				for iter := 0; iter < b.N; iter++ {
+					b.StopTimer()
+					db := initPebble(b)
+					for idx := 0; idx < populateSize; idx++ {
+						db.Set(uint64Key(uint64(idx)), nextVal(idx), pebble.NoSync)
+					}
+					db.Flush()
+
+					var readOps, writeOps int64
+					var wg sync.WaitGroup
+					stop := make(chan struct{})
+
+					for reader := 0; reader < readers; reader++ {
+						wg.Add(1)
+						go func(seed int) {
+							defer wg.Done()
+							rng := mathrand.New(mathrand.NewPCG(uint64(seed), uint64(seed+1)))
+							var ops int64
+							for {
+								select {
+								case <-stop:
+									atomic.AddInt64(&readOps, ops)
+									return
+								default:
+									key := uint64(rng.IntN(populateSize))
+									v, closer, err := db.Get(uint64Key(key))
+									if err == nil {
+										_ = v
+										closer.Close()
+									}
+									ops++
+								}
+							}
+						}(reader * 2)
+					}
+
+					for writer := 0; writer < writers; writer++ {
+						wg.Add(1)
+						go func(base int) {
+							defer wg.Done()
+							var ops int64
+							idx := base
+							for {
+								select {
+								case <-stop:
+									atomic.AddInt64(&writeOps, ops)
+									return
+								default:
+									db.Set(uint64Key(uint64(populateSize+idx)), nextVal(idx), pebble.NoSync)
+									idx += writers
+									ops++
+								}
+							}
+						}(writer)
+					}
+
+					b.StartTimer()
+					time.Sleep(duration)
+					close(stop)
+					wg.Wait()
+					b.StopTimer()
+
+					b.Logf("reads=%d (%d/s) writes=%d (%d/s)",
+						readOps, readOps/int64(duration.Seconds()),
+						writeOps, writeOps/int64(duration.Seconds()))
+					db.Close()
+				}
+			})
+		}
+	}
+}
+
