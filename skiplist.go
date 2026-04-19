@@ -10,17 +10,17 @@ import (
 const maxHeight = 16
 
 // VisibleAll is a snapshot seqnum that makes every entry visible.
-const VisibleAll = uint32(math.MaxUint32)
+const VisibleAll = uint64(math.MaxUint64)
 
 type skipnode struct {
 	key    Key
-	seqnum uint32
+	seqnum uint64
 	value  []byte
 	next   [maxHeight]atomic.Pointer[skipnode]
 	height int
 }
 
-func newSkipnode(key Key, seqnum uint32, value []byte, height int) *skipnode {
+func newSkipnode(key Key, seqnum uint64, value []byte, height int) *skipnode {
 	return &skipnode{key: key, seqnum: seqnum, value: value, height: height}
 }
 
@@ -46,7 +46,7 @@ func randomHeight() int {
 
 // compareNodeKey returns negative if (aKey,aSeq) < (bKey,bSeq), 0 if equal,
 // positive if greater. Order: user_key ASC, seqnum DESC (higher seqnum first).
-func compareNodeKey(aKey Key, aSeq uint32, bKey Key, bSeq uint32) int {
+func compareNodeKey(aKey Key, aSeq uint64, bKey Key, bSeq uint64) int {
 	if c := bytes.Compare(aKey, bKey); c != 0 {
 		return c
 	}
@@ -62,7 +62,7 @@ func compareNodeKey(aKey Key, aSeq uint32, bKey Key, bSeq uint32) int {
 // findPredecessors locates the immediate predecessor at every level for the
 // composite key (key, seqnum). A predecessor at level L is the last node whose
 // composite key strictly precedes (key, seqnum) along the L-th linked list.
-func (s *Skiplist) findPredecessors(key Key, seqnum uint32) [maxHeight]*skipnode {
+func (s *Skiplist) findPredecessors(key Key, seqnum uint64) [maxHeight]*skipnode {
 	var predecessors [maxHeight]*skipnode
 	node := &s.head
 
@@ -82,7 +82,7 @@ func (s *Skiplist) findPredecessors(key Key, seqnum uint32) [maxHeight]*skipnode
 // insert splices a new node into the list at every level up to its height.
 // Callers must ensure (key, seqnum) is unique — the engine enforces this by
 // assigning monotonic seqnums under the commit mutex.
-func (s *Skiplist) insert(key Key, seqnum uint32, value []byte) {
+func (s *Skiplist) insert(key Key, seqnum uint64, value []byte) {
 	predecessors := s.findPredecessors(key, seqnum)
 	height := randomHeight()
 	newNode := newSkipnode(key, seqnum, value, height)
@@ -108,11 +108,11 @@ func (s *Skiplist) insert(key Key, seqnum uint32, value []byte) {
 	s.byteSize.Add(int64(len(key) + len(value)))
 }
 
-func (s *Skiplist) Put(key Key, value []byte, seqnum uint32) {
+func (s *Skiplist) Put(key Key, value []byte, seqnum uint64) {
 	s.insert(key, seqnum, value)
 }
 
-func (s *Skiplist) Delete(key Key, seqnum uint32) {
+func (s *Skiplist) Delete(key Key, seqnum uint64) {
 	s.insert(key, seqnum, nil)
 }
 
@@ -120,7 +120,7 @@ func (s *Skiplist) Delete(key Key, seqnum uint32) {
 // forward through versions of the same user_key (sorted newest-first) and
 // returns the first version whose seqnum ≤ snapshotSeq. A tombstone at that
 // position returns ErrDeleted; no matching version returns ErrNotFound.
-func (s *Skiplist) Get(key Key, snapshotSeq uint32) ([]byte, error) {
+func (s *Skiplist) Get(key Key, snapshotSeq uint64) ([]byte, error) {
 	node := &s.head
 	for level := maxHeight - 1; level >= 0; level-- {
 		for {
@@ -156,7 +156,7 @@ func (s *Skiplist) ByteSize() uint64 {
 // Scan returns an iterator over [lo, hi) restricted to entries visible at
 // snapshotSeq. For each user_key, only the newest visible version is yielded
 // (tombstones included — callers filter them). A nil lo or hi is unbounded.
-func (s *Skiplist) Scan(lo, hi Key, snapshotSeq uint32) *skiplistIterator {
+func (s *Skiplist) Scan(lo, hi Key, snapshotSeq uint64) *skiplistIterator {
 	node := &s.head
 	if lo != nil {
 		for level := maxHeight - 1; level >= 0; level-- {
@@ -185,9 +185,9 @@ func (s *Skiplist) Entries() *skiplistIterator {
 type skiplistIterator struct {
 	current     *skipnode
 	hi          Key
-	snapshotSeq uint32
+	snapshotSeq uint64
 	entry       KeyValue
-	entrySeqnum uint32
+	entrySeqnum uint64
 	lastKey     Key
 	yielded     bool
 }
@@ -223,7 +223,7 @@ func (it *skiplistIterator) Current() KeyValue {
 
 // Seqnum returns the seqnum of the entry last yielded by Next. Only valid
 // after Next returns true.
-func (it *skiplistIterator) Seqnum() uint32 {
+func (it *skiplistIterator) Seqnum() uint64 {
 	return it.entrySeqnum
 }
 

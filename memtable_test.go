@@ -14,9 +14,9 @@ func key(k uint64) []byte {
 }
 
 // seqGen returns a fresh monotonic seqnum generator for a test.
-func seqGen() func() uint32 {
-	var s uint32
-	return func() uint32 {
+func seqGen() func() uint64 {
+	var s uint64
+	return func() uint64 {
 		s++
 		return s
 	}

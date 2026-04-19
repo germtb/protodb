@@ -34,7 +34,7 @@ type Engine struct {
 	compactionMutex sync.RWMutex
 	// seqnum tracks the "epoch" in the memtatable entries. It is used to allow
 	// lock-free scans while other operations are happening.
-	seqnum      atomic.Uint32
+	seqnum      atomic.Uint64
 	memtable    atomic.Pointer[memtable]
 	path        string
 	fileTable   *FileTable
@@ -492,7 +492,7 @@ func (it *mergeIterator) Close() error {
 	return err
 }
 
-func (e *Engine) Scan(lo, hi Key) Iterator {
+func (e *Engine) Scan(lo Key, hi Key) Iterator {
 	seqnum := e.seqnum.Load()
 	activeMemtable := e.memtable.Load()
 	l0ssts := *e.l0ssts.Load()
@@ -891,6 +891,11 @@ func (e *Engine) queueTransaction(tx *Transaction) error {
 
 const MAX_COMMIT_LOOP_STACK = 1000
 
+type transactionResult struct {
+	tx  *Transaction
+	err error
+}
+
 func (e *Engine) commitLoop(counter int) error {
 	if counter > MAX_COMMIT_LOOP_STACK {
 		return nil
@@ -904,7 +909,10 @@ func (e *Engine) commitLoop(counter int) error {
 
 	shouldSync := false
 
+	txResults := make([]transactionResult, 0)
+
 	for node != nil {
+		tx := node.tx
 		batch := node.tx.engine.wal.Batch()
 		for _, entry := range node.tx.entries {
 			if entry.value == nil {
@@ -914,10 +922,14 @@ func (e *Engine) commitLoop(counter int) error {
 			}
 		}
 		err := batch.Commit()
-		if err != nil {
-			node.tx.done <- err
+
+		if e.policy.Sync {
+			txResults = append(txResults, transactionResult{tx, err})
 		} else {
-			node.tx.done <- nil
+			node.tx.done <- err
+		}
+
+		if err == nil {
 			shouldSync = true
 			memtable := e.memtable.Load()
 			startSeq := e.seqnum.Load() + 1
@@ -947,8 +959,21 @@ func (e *Engine) commitLoop(counter int) error {
 		node = node.next.Load()
 	}
 
-	if shouldSync && e.policy.Sync {
-		if err := e.wal.sync(); err != nil {
+	if e.policy.Sync {
+		var err error
+		if shouldSync {
+			err = e.wal.sync()
+		}
+
+		for _, txResult := range txResults {
+			if txResult.err == nil {
+				txResult.tx.done <- err
+			} else {
+				txResult.tx.done <- txResult.err
+			}
+		}
+
+		if err != nil {
 			e.commitMutex.Unlock()
 			return err
 		}

@@ -14,7 +14,7 @@ func BenchmarkMemtablePut(b *testing.B) {
 	v := []byte("value")
 	b.ResetTimer()
 	for iter := 0; iter < b.N; iter++ {
-		m.Put(k, v, uint32(iter+1))
+		m.Put(k, v, uint64(iter+1))
 	}
 }
 
@@ -24,7 +24,7 @@ func BenchmarkSkiplistPut(b *testing.B) {
 	v := []byte("value")
 	b.ResetTimer()
 	for iter := 0; iter < b.N; iter++ {
-		sl.Put(k, v, uint32(iter+1))
+		sl.Put(k, v, uint64(iter+1))
 	}
 }
 
@@ -33,7 +33,7 @@ func BenchmarkSkiplistPutSequential(b *testing.B) {
 	v := []byte("value")
 	b.ResetTimer()
 	for iter := 0; iter < b.N; iter++ {
-		sl.Put(key(uint64(iter)), v, uint32(iter+1))
+		sl.Put(key(uint64(iter)), v, uint64(iter+1))
 	}
 }
 
@@ -42,7 +42,7 @@ func BenchmarkMemtablePutSequential(b *testing.B) {
 	v := []byte("value")
 	b.ResetTimer()
 	for iter := 0; iter < b.N; iter++ {
-		m.Put(key(uint64(iter)), v, uint32(iter+1))
+		m.Put(key(uint64(iter)), v, uint64(iter+1))
 	}
 }
 
@@ -51,7 +51,7 @@ func BenchmarkSkiplistPut100K(b *testing.B) {
 	for iter := 0; iter < b.N; iter++ {
 		sl := NewSkiplist()
 		for i := 0; i < 100_000; i++ {
-			sl.Put(key(uint64(i)), v, uint32(i+1))
+			sl.Put(key(uint64(i)), v, uint64(i+1))
 		}
 	}
 }
@@ -61,7 +61,7 @@ func BenchmarkMemtablePut100K(b *testing.B) {
 	for iter := 0; iter < b.N; iter++ {
 		m := newMemtable()
 		for i := 0; i < 100_000; i++ {
-			m.Put(key(uint64(i)), v, uint32(i+1))
+			m.Put(key(uint64(i)), v, uint64(i+1))
 		}
 	}
 }
@@ -69,7 +69,7 @@ func BenchmarkMemtablePut100K(b *testing.B) {
 func BenchmarkSkiplistGet(b *testing.B) {
 	sl := NewSkiplist()
 	for idx := uint64(0); idx < 10000; idx++ {
-		sl.Put(key(idx), []byte("value"), uint32(idx+1))
+		sl.Put(key(idx), []byte("value"), uint64(idx+1))
 	}
 	k := key(5000)
 	b.ResetTimer()
@@ -81,7 +81,7 @@ func BenchmarkSkiplistGet(b *testing.B) {
 func BenchmarkMemtableGet(b *testing.B) {
 	m := newMemtable()
 	for idx := uint64(0); idx < 10000; idx++ {
-		m.Put(key(idx), []byte("value"), uint32(idx+1))
+		m.Put(key(idx), []byte("value"), uint64(idx+1))
 	}
 	k := key(5000)
 	b.ResetTimer()
@@ -93,7 +93,7 @@ func BenchmarkMemtableGet(b *testing.B) {
 func BenchmarkMemtableGetWithKeyAlloc(b *testing.B) {
 	m := newMemtable()
 	for idx := uint64(0); idx < 10000; idx++ {
-		m.Put(key(idx), []byte("value"), uint32(idx+1))
+		m.Put(key(idx), []byte("value"), uint64(idx+1))
 	}
 	b.ResetTimer()
 	for iter := 0; iter < b.N; iter++ {

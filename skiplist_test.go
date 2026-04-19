@@ -91,7 +91,7 @@ func TestSkiplistDeleteNonexistent(t *testing.T) {
 
 func TestSkiplistOrdering(t *testing.T) {
 	sl := NewSkiplist()
-	var seq uint32
+	var seq uint64
 	// Insert out of order
 	for _, k := range []uint64{50, 10, 30, 20, 40} {
 		seq++
@@ -119,7 +119,7 @@ func TestSkiplistOrdering(t *testing.T) {
 func TestSkiplistScan(t *testing.T) {
 	sl := NewSkiplist()
 	for i := uint64(0); i < 100; i++ {
-		sl.Put(skipKey(i), []byte(fmt.Sprintf("v%d", i)), uint32(i+1))
+		sl.Put(skipKey(i), []byte(fmt.Sprintf("v%d", i)), uint64(i+1))
 	}
 
 	iter := sl.Scan(skipKey(20), skipKey(30), VisibleAll)
@@ -143,7 +143,7 @@ func TestSkiplistScan(t *testing.T) {
 func TestSkiplistScanAll(t *testing.T) {
 	sl := NewSkiplist()
 	for i := uint64(0); i < 10; i++ {
-		sl.Put(skipKey(i), []byte(fmt.Sprintf("v%d", i)), uint32(i+1))
+		sl.Put(skipKey(i), []byte(fmt.Sprintf("v%d", i)), uint64(i+1))
 	}
 
 	iter := sl.Scan(nil, nil, VisibleAll)
@@ -202,7 +202,7 @@ func TestSkiplistManyEntries(t *testing.T) {
 	count := 10000
 
 	for i := 0; i < count; i++ {
-		sl.Put(skipKey(uint64(i)), []byte(fmt.Sprintf("value-%d", i)), uint32(i+1))
+		sl.Put(skipKey(uint64(i)), []byte(fmt.Sprintf("value-%d", i)), uint64(i+1))
 	}
 
 	if sl.Len() != count {
@@ -239,7 +239,7 @@ func TestSkiplistManyEntries(t *testing.T) {
 func TestSkiplistConcurrentReads(t *testing.T) {
 	sl := NewSkiplist()
 	for i := uint64(0); i < 1000; i++ {
-		sl.Put(skipKey(i), []byte(fmt.Sprintf("v%d", i)), uint32(i+1))
+		sl.Put(skipKey(i), []byte(fmt.Sprintf("v%d", i)), uint64(i+1))
 	}
 
 	var wg sync.WaitGroup
@@ -267,7 +267,7 @@ func TestSkiplistConcurrentReads(t *testing.T) {
 func TestSkiplistConcurrentWrites(t *testing.T) {
 	sl := NewSkiplist()
 	var wg sync.WaitGroup
-	var seq atomic.Uint32
+	var seq atomic.Uint64
 
 	for goroutine := 0; goroutine < 10; goroutine++ {
 		wg.Add(1)
@@ -296,11 +296,11 @@ func TestSkiplistConcurrentWrites(t *testing.T) {
 func TestSkiplistConcurrentReadsDuringWrites(t *testing.T) {
 	sl := NewSkiplist()
 	for i := uint64(0); i < 500; i++ {
-		sl.Put(skipKey(i), []byte(fmt.Sprintf("v%d", i)), uint32(i+1))
+		sl.Put(skipKey(i), []byte(fmt.Sprintf("v%d", i)), uint64(i+1))
 	}
 
 	var wg sync.WaitGroup
-	var seq atomic.Uint32
+	var seq atomic.Uint64
 	seq.Store(500)
 
 	for goroutine := 0; goroutine < 5; goroutine++ {
@@ -339,7 +339,7 @@ func TestSkiplistConcurrentReadsDuringWrites(t *testing.T) {
 func TestSkiplistConcurrentPutSameKey(t *testing.T) {
 	sl := NewSkiplist()
 	var wg sync.WaitGroup
-	var seq atomic.Uint32
+	var seq atomic.Uint64
 
 	// 10 goroutines all writing to the same key concurrently — each Put gets
 	// a unique seqnum, so all 1000 versions are preserved.
@@ -423,11 +423,11 @@ func TestBulkGetDuringFlush(t *testing.T) {
 func TestSkiplistConcurrentScanDuringWrites(t *testing.T) {
 	sl := NewSkiplist()
 	for i := uint64(0); i < 100; i++ {
-		sl.Put(skipKey(i), []byte(fmt.Sprintf("v%d", i)), uint32(i+1))
+		sl.Put(skipKey(i), []byte(fmt.Sprintf("v%d", i)), uint64(i+1))
 	}
 
 	var wg sync.WaitGroup
-	var seq atomic.Uint32
+	var seq atomic.Uint64
 	seq.Store(100)
 
 	wg.Add(1)
