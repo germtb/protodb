@@ -424,21 +424,22 @@ func ReadSST(path string, hash string, options *ReaderOptions) (*sst, error) {
 		_, err := file.ReadAt(compressed, int64(last.Offset))
 
 		if err != nil {
-			return nil, err
+			return s, err
 		}
 
 		data, err := snappy.Decode(nil, compressed)
 
 		if err != nil {
-			return nil, err
-		} else if int64(len(data)) < blockFooterSize {
-			return nil, ErrCorrupted
+			return s, err
+		}
+		if int64(len(data)) < blockFooterSize {
+			return s, ErrCorrupted
 		}
 
 		stored := binary.BigEndian.Uint32(data[len(data)-4:])
 
 		if crc32.ChecksumIEEE(data[:len(data)-4]) != stored {
-			return nil, ErrCorrupted
+			return s, ErrCorrupted
 		}
 
 		end := int64(len(data)) - blockFooterSize
