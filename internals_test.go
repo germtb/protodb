@@ -157,7 +157,7 @@ func BenchmarkSSTIterate1000(b *testing.B) {
 	b.ResetTimer()
 	for iter := 0; iter < b.N; iter++ {
 		count := 0
-		it := s.Iterator(lo, hi, f)
+		it := s.Iterator(lo, hi, f, false)
 		for it.Next() {
 			count++
 		}

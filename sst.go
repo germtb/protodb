@@ -62,11 +62,15 @@ construction over the sorted entry slice.
 
 Entry layout:
 
-┌──────────────────────────────────────────────────┐
-│   key_len(u32) | key                             │
-│   value_len(u32) | value                         │
-│   left(u16) | right(u16)                         │  ← BST children, 0xFFFF = none
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│   key_len(u32) | key                                         │
+│   value_len(u32) | value                                     │
+│   left(u16) | right(u16) | prev(u16)                         │  ← BST children + back-link, 0xFFFF = none
+└──────────────────────────────────────────────────────────────┘
+
+`prev` is the byte offset of the previous entry (ascending-key order) within
+the same block, or 0xFFFF for the first entry. Lets Prev() walk backwards in
+O(1) without a separately-stored offset index.
 
 */
 
@@ -180,7 +184,8 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 			}
 
 			leftPosition := inBlockOffset + 4 /* key_len */ + keyLen + 4 /* val_len */ + int(valueLen)
-			rightPosition := leftPosition + 2 // The right child pointer is 2 bytes after the left child
+			rightPosition := leftPosition + 2
+			prevPosition := rightPosition + 2
 
 			if left[i] != noChild {
 				binary.BigEndian.PutUint16(data[leftPosition:], inBlockOffsets[left[i]])
@@ -188,6 +193,13 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 
 			if right[i] != noChild {
 				binary.BigEndian.PutUint16(data[rightPosition:], inBlockOffsets[right[i]])
+			}
+
+			// Back-link: offset of the previous entry in sorted order (i-1);
+			// the first entry keeps the noChild sentinel written at entry
+			// serialization time.
+			if i > 0 {
+				binary.BigEndian.PutUint16(data[prevPosition:], inBlockOffsets[i-1])
 			}
 		}
 
@@ -320,7 +332,7 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 			firstKey = append(Key(nil), key...) // copy the key
 		}
 
-		// Write entry: key_len(u32) | key | value_len(u32) | value | left(u16) | right(u16)
+		// Write entry: key_len(u32) | key | value_len(u32) | value | left(u16) | right(u16) | prev(u16)
 		inBlockOffsets[inBlockEntries] = uint16(block.Len())
 		writeU32(&block, uint32(len(key)))
 		block.Write(key)
@@ -332,7 +344,11 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 		if value != nil {
 			block.Write(value)
 		}
-		writeU32(&block, 0xFFFFFFFF) // left(u16) + right(u16), patched by finishBlock
+		// left(u16) + right(u16) + prev(u16), all patched by finishBlock.
+		// Default to noChild (0xFFFF) so the first entry's prev is correct
+		// without needing a special case.
+		writeU32(&block, 0xFFFFFFFF)
+		writeU16(&block, 0xFFFF)
 
 		inBlockEntries += 1
 	}
@@ -512,7 +528,7 @@ func readEntry(data []byte, pos int64) (key Key, valueLen uint32, entrySize int6
 	valueLen = binary.BigEndian.Uint32(data[pos : pos+4])
 	pos += 4
 
-	entrySize = 4 + int64(keyLen) + 4 + 4 // +4 for left(u16) + right(u16)
+	entrySize = 4 + int64(keyLen) + 4 + 6 // +6 for left(u16) + right(u16) + prev(u16)
 	if valueLen != tombstone {
 		entrySize += int64(valueLen)
 	}
@@ -668,7 +684,7 @@ func (s *sst) BulkGet(sortedKeys []Key, reader reader) ([][]byte, []error, error
 				if valueLen == tombstone {
 					errs[wantedIdx] = ErrDeleted
 				} else {
-					valueStart := pos + entrySize - int64(valueLen) - 4 // -4: left/right are after value
+					valueStart := pos + entrySize - int64(valueLen) - 6 // -6: left+right+prev are after value
 					values[wantedIdx] = data[valueStart : valueStart+int64(valueLen)]
 					errs[wantedIdx] = nil
 				}
@@ -696,28 +712,63 @@ type sstIterator struct {
 	end        int64
 	current    KeyValue
 	done       bool
+	reverse    bool
 }
 
-func (s *sst) Iterator(lo Key, hi Key, r reader) *sstIterator {
-	blockIndex := bsearchBlock(s.blocks, lo) - 1
-
-	blockIndex = max(blockIndex, 0)
-
-	return &sstIterator{
-		sst:        s,
-		reader:     r,
-		lo:         lo,
-		hi:         hi,
-		blockIndex: blockIndex,
-		done:       blockIndex >= len(s.blocks),
+// Iterator returns an iterator over [lo, hi) on this SST. Direction is baked
+// in at construction: reverse=false iterates ascending, reverse=true
+// iterates descending. Callers drive either direction with Next().
+func (s *sst) Iterator(lo Key, hi Key, r reader, reverse bool) *sstIterator {
+	it := &sstIterator{sst: s, reader: r, lo: lo, hi: hi, reverse: reverse}
+	if reverse {
+		if hi == nil {
+			it.blockIndex = len(s.blocks) - 1
+		} else {
+			it.blockIndex = bsearchBlock(s.blocks, hi) - 1
+			if it.blockIndex >= len(s.blocks) {
+				it.blockIndex = len(s.blocks) - 1
+			}
+		}
+		it.done = it.blockIndex < 0
+	} else {
+		it.blockIndex = bsearchBlock(s.blocks, lo) - 1
+		if it.blockIndex < 0 {
+			it.blockIndex = 0
+		}
+		it.done = it.blockIndex >= len(s.blocks)
 	}
+	return it
+}
+
+func findLastEntryOffset(data []byte) (int64, error) {
+	entriesEnd := int64(len(data)) - blockFooterSize
+	if entriesEnd < 2 {
+		return 0, ErrCorrupted
+	}
+	prevOfLast := binary.BigEndian.Uint16(data[entriesEnd-2 : entriesEnd])
+	if prevOfLast == noChild {
+		// Single-entry block: the only entry starts at 0.
+		return 0, nil
+	}
+	_, _, prevEntrySize, err := readEntry(data, int64(prevOfLast))
+	if err != nil {
+		return 0, err
+	}
+	return int64(prevOfLast) + prevEntrySize, nil
 }
 
 func (it *sstIterator) Next() bool {
+	if it.reverse {
+		return it.nextReverse()
+	} else {
+		return it.nextForward()
+	}
+}
+
+func (it *sstIterator) nextForward() bool {
 	if it.done {
 		return false
 	}
-
 	for {
 		// Load block if needed
 		if it.block == nil {
@@ -760,11 +811,75 @@ func (it *sstIterator) Next() bool {
 			if valueLen == tombstone {
 				it.current = KeyValue{entryKey, nil}
 			} else {
-				valueStart := it.pos - int64(valueLen) - 4 // -4: left/right are after value
+				valueStart := it.pos - int64(valueLen) - 6 // -6: left+right+prev are after value
 				it.current = KeyValue{entryKey, data[valueStart : valueStart+int64(valueLen)]}
 			}
 			return true
 		}
+	}
+}
+
+func (it *sstIterator) nextReverse() bool {
+	if it.done {
+		return false
+	}
+	for {
+		// Load block if needed; position at its last entry.
+		if it.block == nil {
+			if it.blockIndex < 0 {
+				it.done = true
+				return false
+			}
+			block, err := it.sst.GetBlock(uint64(it.blockIndex), it.reader)
+			if err != nil {
+				it.done = true
+				return false
+			}
+			it.block = block
+			it.pos, err = findLastEntryOffset(block.data)
+			if err != nil {
+				it.done = true
+				return false
+			}
+		}
+
+		data := it.block.data
+		cur := it.pos
+		entryKey, valueLen, entrySize, err := readEntry(data, cur)
+		if err != nil {
+			it.done = true
+			return false
+		}
+
+		// Advance the cursor: follow this entry's prev pointer (last 2 bytes
+		// of the entry). noChild means we just read the first entry of this
+		// block — drop into the previous block on the next call.
+		prevOffset := binary.BigEndian.Uint16(data[cur+entrySize-2 : cur+entrySize])
+		if prevOffset == noChild {
+			it.blockIndex--
+			it.block = nil
+		} else {
+			it.pos = int64(prevOffset)
+		}
+
+		// Entries in a block are in ascending key order. Walking backward,
+		// keys too high for the range come first — skip them, keep going.
+		// A key below lo means we've left the range entirely — done.
+		if it.hi != nil && bytes.Compare(entryKey, it.hi) >= 0 {
+			continue
+		}
+		if it.lo != nil && bytes.Compare(entryKey, it.lo) < 0 {
+			it.done = true
+			return false
+		}
+
+		if valueLen == tombstone {
+			it.current = KeyValue{entryKey, nil}
+		} else {
+			valueStart := cur + 4 + int64(len(entryKey)) + 4
+			it.current = KeyValue{entryKey, data[valueStart : valueStart+int64(valueLen)]}
+		}
+		return true
 	}
 }
 
@@ -792,16 +907,28 @@ type sstConcatIterator struct {
 	sstIndex        int
 	currentIterator *sstIterator
 	done            bool
+	reverse         bool // determines stepping direction
 }
 
-// newSSTConcatIterator creates an iterator over the given sorted, non-overlapping SSTs.
-// `openSST` is a callback that returns a reader for the given SST.
-func newSSTConcatIterator(ssts []*sst, lo Key, hi Key, openSST func(*sst) (reader, error)) *sstConcatIterator {
-	// Find the first SST that could contain `lo`
-	startIndex := 0
-	if lo != nil {
-		startIndex = bsearchBlock(toBlockIndices(ssts), lo) - 1
-		startIndex = max(startIndex, 0)
+// newSSTConcatIterator creates an iterator over the given sorted,
+// non-overlapping SSTs, in either direction. `openSST` returns a reader for
+// the given SST.
+func newSSTConcatIterator(ssts []*sst, lo Key, hi Key, openSST func(*sst) (reader, error), reverse bool) *sstConcatIterator {
+	var startIndex int
+	if reverse {
+		if hi == nil {
+			startIndex = len(ssts) - 1
+		} else {
+			startIndex = bsearchBlock(toBlockIndices(ssts), hi) - 1
+			if startIndex >= len(ssts) {
+				startIndex = len(ssts) - 1
+			}
+		}
+	} else {
+		if lo != nil {
+			startIndex = bsearchBlock(toBlockIndices(ssts), lo) - 1
+			startIndex = max(startIndex, 0)
+		}
 	}
 
 	it := &sstConcatIterator{
@@ -810,8 +937,13 @@ func newSSTConcatIterator(ssts []*sst, lo Key, hi Key, openSST func(*sst) (reade
 		lo:       lo,
 		hi:       hi,
 		sstIndex: startIndex,
+		reverse:  reverse,
 	}
-	it.done = startIndex >= len(ssts)
+	if reverse {
+		it.done = startIndex < 0
+	} else {
+		it.done = startIndex >= len(ssts)
+	}
 	return it
 }
 
@@ -825,37 +957,56 @@ func toBlockIndices(ssts []*sst) []sstBlockIndex {
 	return out
 }
 
+// Next walks one step in the configured direction, transitioning between
+// sub-iterators at SST boundaries.
 func (it *sstConcatIterator) Next() bool {
 	for !it.done {
-		// Open the current SST iterator if needed
 		if it.currentIterator == nil {
-			if it.sstIndex >= len(it.ssts) {
-				it.done = true
-				return false
+			if it.reverse {
+				if it.sstIndex < 0 {
+					it.done = true
+					return false
+				}
+			} else {
+				if it.sstIndex >= len(it.ssts) {
+					it.done = true
+					return false
+				}
 			}
 			s := it.ssts[it.sstIndex]
-			// Skip SSTs entirely past the upper bound
-			if it.hi != nil && bytes.Compare(s.firstKey, it.hi) >= 0 {
-				it.done = true
-				return false
+			// Skip SSTs entirely outside the bound in the direction of travel.
+			if it.reverse {
+				if it.lo != nil && s.lastKey != nil && bytes.Compare(s.lastKey, it.lo) < 0 {
+					it.done = true
+					return false
+				}
+			} else {
+				if it.hi != nil && bytes.Compare(s.firstKey, it.hi) >= 0 {
+					it.done = true
+					return false
+				}
 			}
 			r, err := it.openSST(s)
 			if err != nil {
 				it.done = true
 				return false
 			}
-			it.currentIterator = s.Iterator(it.lo, it.hi, r)
+			it.currentIterator = s.Iterator(it.lo, it.hi, r, it.reverse)
 		}
 
 		if it.currentIterator.Next() {
 			return true
 		}
 
-		// Current SST exhausted; move to next
-		// TODO: add an error interface to the iterator and capture this error
+		// Current SST exhausted in this direction; move to next/prev SST.
+		// TODO: capture iterator close error.
 		_ = it.currentIterator.Close()
 		it.currentIterator = nil
-		it.sstIndex++
+		if it.reverse {
+			it.sstIndex--
+		} else {
+			it.sstIndex++
+		}
 	}
 	return false
 }

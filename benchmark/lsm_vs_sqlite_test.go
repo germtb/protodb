@@ -460,11 +460,171 @@ func BenchmarkLSMvsSQLite(b *testing.B) {
 			})
 		}
 	})
+
+	// --- ReverseScan: same range, descending order ---
+
+	b.Run("ReverseScan1000/SQLite", func(b *testing.B) {
+		db := initKVSQLite(b, "NORMAL")
+		defer db.Close()
+		tx, _ := db.Begin()
+		stmt, _ := tx.Prepare(`INSERT INTO kv(key, value) VALUES(?, ?)`)
+		for idx := 0; idx < populateSize; idx++ {
+			stmt.Exec(int64(idx), val)
+		}
+		stmt.Close()
+		tx.Commit()
+
+		scan, _ := db.Prepare(`SELECT key, value FROM kv WHERE key >= ? AND key < ? ORDER BY key DESC`)
+		defer scan.Close()
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			rows, err := scan.Query(int64(0), int64(1000))
+			if err != nil {
+				b.Fatal(err)
+			}
+			count := 0
+			for rows.Next() {
+				var key int64
+				var value []byte
+				rows.Scan(&key, &value)
+				count++
+			}
+			rows.Close()
+			if count != 1000 {
+				b.Fatalf("expected 1000 rows, got %d", count)
+			}
+		}
+	})
+
+	b.Run("ReverseScan1000/LSM", func(b *testing.B) {
+		engine := initLSM(b)
+		defer engine.Close()
+		for idx := 0; idx < populateSize; idx++ {
+			engine.Put(uint64Key(uint64(idx)), val)
+		}
+		engine.Flush()
+		engine.Compact()
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			count := 0
+			scanner := engine.ReverseScan(poolKey(0), poolKey(1000))
+			for scanner.Next() {
+				count++
+			}
+			if count != 1000 {
+				b.Fatalf("expected 1000 entries, got %d", count)
+			}
+		}
+	})
+
+	b.Run("ReverseScan1000/Pebble", func(b *testing.B) {
+		db := initPebble(b)
+		defer db.Close()
+		for idx := 0; idx < populateSize; idx++ {
+			db.Set(uint64Key(uint64(idx)), val, pebble.NoSync)
+		}
+		db.Flush()
+		lo := uint64Key(0)
+		hi := uint64Key(1000)
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			it, _ := db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+			count := 0
+			for it.Last(); it.Valid(); it.Prev() {
+				_ = it.Value()
+				count++
+			}
+			it.Close()
+			if count != 1000 {
+				b.Fatalf("expected 1000 entries, got %d", count)
+			}
+		}
+	})
+
+	b.Run("ReverseScan1000/Bolt", func(b *testing.B) {
+		db := initBolt(b)
+		defer db.Close()
+		db.Update(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket(boltBucket)
+			for idx := 0; idx < populateSize; idx++ {
+				bucket.Put(uint64Key(uint64(idx)), val)
+			}
+			return nil
+		})
+		lo := uint64Key(0)
+		hi := uint64Key(1000)
+		b.ResetTimer()
+		for iter := 0; iter < b.N; iter++ {
+			db.View(func(tx *bolt.Tx) error {
+				cursor := tx.Bucket(boltBucket).Cursor()
+				count := 0
+				// Position at the first key >= hi, then step back to the last
+				// key < hi (or to Last() if hi is past the end).
+				k, _ := cursor.Seek(hi)
+				if k == nil {
+					k, _ = cursor.Last()
+				} else {
+					k, _ = cursor.Prev()
+				}
+				for ; k != nil; k, _ = cursor.Prev() {
+					if bytes.Compare(k, lo) < 0 {
+						break
+					}
+					count++
+				}
+				if count != 1000 {
+					b.Fatalf("expected 1000 entries, got %d", count)
+				}
+				return nil
+			})
+		}
+	})
+}
+
+// loadedCacheVersion gates reuse of persistent populate dirs. Bump whenever
+// an on-disk format changes (SST footer, entry layout, manifest, WAL) so
+// stale caches get rebuilt instead of silently returning corrupt data.
+const loadedCacheVersion = 2
+
+// loadedCacheDir returns a stable directory for a cached, pre-populated DB
+// of the given engine. The caller checks for a ".loaded" sentinel inside; if
+// present, the populate step is skipped. If absent (first run or prior
+// crash), the caller wipes the dir and repopulates.
+//
+// PROTODB_REFRESH_CACHE=1 forces a fresh populate regardless of sentinel.
+func loadedCacheDir(engine string) string {
+	return filepath.Join(os.TempDir(),
+		fmt.Sprintf("protodb-loaded-v%d", loadedCacheVersion), engine)
+}
+
+func isPopulated(dir string) bool {
+	if os.Getenv("PROTODB_REFRESH_CACHE") == "1" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, ".loaded"))
+	return err == nil
+}
+
+func markPopulated(dir string) error {
+	return os.WriteFile(filepath.Join(dir, ".loaded"), nil, 0644)
+}
+
+// prepareCacheDir ensures `dir` exists and is empty (stale dirs without the
+// .loaded sentinel are wiped). Used before a populate.
+func prepareCacheDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestLoadedPerformance measures Get, GetMiss, and Scan after populating
-// ~500 MB of data. Uses Test (not Benchmark) to avoid re-populating per
-// sub-benchmark. Each engine is populated once, then all ops are timed.
+// ~500 MB of data into each engine. Uses persistent cache dirs so repeat
+// runs skip the ~minutes-long populate step. Bump loadedCacheVersion to
+// invalidate caches after a format change.
 func TestLoadedPerformance(t *testing.T) {
 	val := make([]byte, 100)
 	const totalEntries = 4_300_000 // ~500 MB at 120 bytes/entry
@@ -481,22 +641,32 @@ func TestLoadedPerformance(t *testing.T) {
 	}
 
 	// --- LSM ---
-	t.Log("Loading LSM...")
-	engine, _ := protodb.Open(t.TempDir())
-	engine.SetPolicy(&protodb.Policy{
-		FlushThreshold:      1024 * 1024 * 64,
-		SoftCompactionThreshold: 1000,
-	})
-	for idx := 0; idx < totalEntries; idx++ {
-		engine.Put(uint64Key(uint64(idx)), val)
-		if (idx+1)%batchSize == 0 {
-			engine.Flush()
-			engine.Compact()
+	lsmDir := loadedCacheDir("lsm")
+	if !isPopulated(lsmDir) {
+		t.Log("Populating LSM (first run)...")
+		prepareCacheDir(t, lsmDir)
+		engine, _ := protodb.Open(lsmDir)
+		// No SetPolicy — defaults give us auto-flush at 64MB and
+		// auto-compact at 4 L0 SSTs. The engine handles the rest.
+		for idx := 0; idx < totalEntries; idx++ {
+			engine.Put(uint64Key(uint64(idx)), val)
 		}
-	}
-	if totalEntries%batchSize != 0 {
+		// One explicit Flush at the end drains the final memtable remainder
+		// into an SST so the reopen doesn't pay for WAL replay; Compact then
+		// folds that last L0 SST into L1 so the cached state is L1-only and
+		// the measurements hit the same code path every run.
 		engine.Flush()
 		engine.Compact()
+		engine.Close()
+		if err := markPopulated(lsmDir); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		t.Log("Reusing cached LSM")
+	}
+	engine, err := protodb.Open(lsmDir)
+	if err != nil {
+		t.Fatal(err)
 	}
 	s := engine.Stats()
 	t.Logf("LSM loaded: %d SSTs, %.1f MB", s.L1SSTs, float64(s.L1Bytes)/(1024*1024))
@@ -512,25 +682,46 @@ func TestLoadedPerformance(t *testing.T) {
 		for scanner.Next() {
 		}
 	})
+	measure("ReverseScan1000/LSM", func(i int) {
+		scanner := engine.ReverseScan(poolKey(0), poolKey(1000))
+		for scanner.Next() {
+		}
+	})
 	engine.Close()
 
 	// --- Pebble ---
-	t.Log("Loading Pebble...")
-	pdb := initPebbleT(t)
-	batch := pdb.NewBatch()
-	for idx := 0; idx < totalEntries; idx++ {
-		batch.Set(uint64Key(uint64(idx)), val, nil)
-		if (idx+1)%batchSize == 0 {
-			batch.Commit(pebble.NoSync)
-			batch = pdb.NewBatch()
+	pebbleDir := loadedCacheDir("pebble")
+	if !isPopulated(pebbleDir) {
+		t.Log("Populating Pebble (first run)...")
+		prepareCacheDir(t, pebbleDir)
+		pdb, err := pebble.Open(pebbleDir, pebbleOptionsMatched())
+		if err != nil {
+			t.Fatal(err)
 		}
+		batch := pdb.NewBatch()
+		for idx := 0; idx < totalEntries; idx++ {
+			batch.Set(uint64Key(uint64(idx)), val, nil)
+			if (idx+1)%batchSize == 0 {
+				batch.Commit(pebble.NoSync)
+				batch = pdb.NewBatch()
+			}
+		}
+		if batch.Count() > 0 {
+			batch.Commit(pebble.NoSync)
+		}
+		pdb.Flush()
+		pdb.Compact(uint64Key(0), uint64Key(uint64(totalEntries)), true)
+		pdb.Close()
+		if err := markPopulated(pebbleDir); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		t.Log("Reusing cached Pebble")
 	}
-	if batch.Count() > 0 {
-		batch.Commit(pebble.NoSync)
+	pdb, err := pebble.Open(pebbleDir, pebbleOptionsMatched())
+	if err != nil {
+		t.Fatal(err)
 	}
-	pdb.Flush()
-	pdb.Compact(uint64Key(0), uint64Key(uint64(totalEntries)), true)
-	t.Log("Pebble loaded")
 
 	measure("Get/Pebble", func(i int) {
 		v, closer, err := pdb.Get(poolKey(i % totalEntries))
@@ -552,25 +743,56 @@ func TestLoadedPerformance(t *testing.T) {
 		}
 		it.Close()
 	})
+	measure("ReverseScan1000/Pebble", func(i int) {
+		it, _ := pdb.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+		for it.Last(); it.Valid(); it.Prev() {
+			_ = it.Value()
+		}
+		it.Close()
+	})
 	pdb.Close()
 
 	// --- Bolt ---
-	t.Log("Loading Bolt...")
-	bdb := initBoltT(t)
-	for start := 0; start < totalEntries; start += batchSize {
-		end := start + batchSize
-		if end > totalEntries {
-			end = totalEntries
+	boltDir := loadedCacheDir("bolt")
+	boltPath := filepath.Join(boltDir, "bolt.db")
+	openBolt := func() *bolt.DB {
+		db, err := bolt.Open(boltPath, 0600, nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-		bdb.Update(func(tx *bolt.Tx) error {
-			bucket := tx.Bucket(boltBucket)
-			for idx := start; idx < end; idx++ {
-				bucket.Put(uint64Key(uint64(idx)), val)
-			}
-			return nil
-		})
+		if err := db.Update(func(tx *bolt.Tx) error {
+			_, err := tx.CreateBucketIfNotExists(boltBucket)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return db
 	}
-	t.Log("Bolt loaded")
+	if !isPopulated(boltDir) {
+		t.Log("Populating Bolt (first run)...")
+		prepareCacheDir(t, boltDir)
+		bdb := openBolt()
+		for start := 0; start < totalEntries; start += batchSize {
+			end := start + batchSize
+			if end > totalEntries {
+				end = totalEntries
+			}
+			bdb.Update(func(tx *bolt.Tx) error {
+				bucket := tx.Bucket(boltBucket)
+				for idx := start; idx < end; idx++ {
+					bucket.Put(uint64Key(uint64(idx)), val)
+				}
+				return nil
+			})
+		}
+		bdb.Close()
+		if err := markPopulated(boltDir); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		t.Log("Reusing cached Bolt")
+	}
+	bdb := openBolt()
 
 	measure("Get/Bolt", func(i int) {
 		bdb.View(func(tx *bolt.Tx) error {
@@ -581,6 +803,38 @@ func TestLoadedPerformance(t *testing.T) {
 	measure("GetMiss/Bolt", func(i int) {
 		bdb.View(func(tx *bolt.Tx) error {
 			_ = tx.Bucket(boltBucket).Get(uint64Key(uint64(totalEntries + i)))
+			return nil
+		})
+	})
+	// Scan + ReverseScan over [0, 1000) on the loaded Bolt DB.
+	boltLo := uint64Key(0)
+	boltHi := uint64Key(1000)
+	measure("Scan1000/Bolt", func(i int) {
+		bdb.View(func(tx *bolt.Tx) error {
+			cursor := tx.Bucket(boltBucket).Cursor()
+			for k, _ := cursor.First(); k != nil; k, _ = cursor.Next() {
+				if bytes.Compare(k, boltHi) >= 0 {
+					break
+				}
+			}
+			return nil
+		})
+	})
+	measure("ReverseScan1000/Bolt", func(i int) {
+		bdb.View(func(tx *bolt.Tx) error {
+			cursor := tx.Bucket(boltBucket).Cursor()
+			// Position at the first key >= hi, step back to land on < hi.
+			k, _ := cursor.Seek(boltHi)
+			if k == nil {
+				k, _ = cursor.Last()
+			} else {
+				k, _ = cursor.Prev()
+			}
+			for ; k != nil; k, _ = cursor.Prev() {
+				if bytes.Compare(k, boltLo) < 0 {
+					break
+				}
+			}
 			return nil
 		})
 	})

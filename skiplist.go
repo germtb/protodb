@@ -153,10 +153,29 @@ func (s *Skiplist) ByteSize() uint64 {
 	return uint64(s.byteSize.Load())
 }
 
-// Scan returns an iterator over [lo, hi) restricted to entries visible at
-// snapshotSeq. For each user_key, only the newest visible version is yielded
-// (tombstones included — callers filter them). A nil lo or hi is unbounded.
 func (s *Skiplist) Scan(lo, hi Key, snapshotSeq uint64) *skiplistIterator {
+	return &skiplistIterator{
+		entries: s.materialize(lo, hi, snapshotSeq),
+		idx:     -1,
+	}
+}
+
+func (s *Skiplist) ReverseScan(lo, hi Key, snapshotSeq uint64) *skiplistIterator {
+	entries := s.materialize(lo, hi, snapshotSeq)
+	return &skiplistIterator{
+		entries: entries,
+		idx:     len(entries),
+		reverse: true,
+	}
+}
+
+// Entries iterates the full skiplist with see-all visibility. One version per
+// user_key (newest wins). Used by flush.
+func (s *Skiplist) Entries() *skiplistIterator {
+	return s.Scan(nil, nil, VisibleAll)
+}
+
+func (s *Skiplist) materialize(lo, hi Key, snapshotSeq uint64) []KeyValue {
 	node := &s.head
 	if lo != nil {
 		for level := maxHeight - 1; level >= 0; level-- {
@@ -169,62 +188,59 @@ func (s *Skiplist) Scan(lo, hi Key, snapshotSeq uint64) *skiplistIterator {
 			}
 		}
 	}
-	return &skiplistIterator{
-		current:     node.next[0].Load(),
-		hi:          hi,
-		snapshotSeq: snapshotSeq,
-	}
-}
+	current := node.next[0].Load()
 
-// Entries iterates the full skiplist with see-all visibility. One version per
-// user_key (newest wins). Used by flush.
-func (s *Skiplist) Entries() *skiplistIterator {
-	return s.Scan(nil, nil, VisibleAll)
+	var out []KeyValue
+	var lastKey Key
+	yielded := false
+	for current != nil {
+		if hi != nil && bytes.Compare(current.key, hi) >= 0 {
+			break
+		}
+		if yielded && bytes.Equal(current.key, lastKey) {
+			// Older version of a key we've already yielded — skip.
+			current = current.next[0].Load()
+			continue
+		}
+		if current.seqnum > snapshotSeq {
+			// Invisible at this snapshot — keep walking for an older version
+			// of the same user_key.
+			current = current.next[0].Load()
+			continue
+		}
+		out = append(out, KeyValue{Key: current.key, Value: current.value})
+		lastKey = current.key
+		yielded = true
+		current = current.next[0].Load()
+	}
+	return out
 }
 
 type skiplistIterator struct {
-	current     *skipnode
-	hi          Key
-	snapshotSeq uint64
-	entry       KeyValue
-	entrySeqnum uint64
-	lastKey     Key
-	yielded     bool
+	entries []KeyValue
+	idx     int
+	reverse bool
 }
 
 func (it *skiplistIterator) Next() bool {
-	for it.current != nil {
-		if it.hi != nil && bytes.Compare(it.current.key, it.hi) >= 0 {
+	if it.reverse {
+		if it.idx <= 0 {
+			it.idx = -1
 			return false
 		}
-		if it.yielded && bytes.Equal(it.current.key, it.lastKey) {
-			// Older version of a key we've already yielded — skip.
-			it.current = it.current.next[0].Load()
-			continue
-		}
-		if it.current.seqnum > it.snapshotSeq {
-			// Invisible at this snapshot — skip to look for an older version.
-			it.current = it.current.next[0].Load()
-			continue
-		}
-		it.entry = KeyValue{Key: it.current.key, Value: it.current.value}
-		it.entrySeqnum = it.current.seqnum
-		it.lastKey = it.current.key
-		it.yielded = true
-		it.current = it.current.next[0].Load()
+		it.idx--
 		return true
 	}
-	return false
+	if it.idx >= len(it.entries)-1 {
+		it.idx = len(it.entries)
+		return false
+	}
+	it.idx++
+	return true
 }
 
 func (it *skiplistIterator) Current() KeyValue {
-	return it.entry
-}
-
-// Seqnum returns the seqnum of the entry last yielded by Next. Only valid
-// after Next returns true.
-func (it *skiplistIterator) Seqnum() uint64 {
-	return it.entrySeqnum
+	return it.entries[it.idx]
 }
 
 func (it *skiplistIterator) Close() error {

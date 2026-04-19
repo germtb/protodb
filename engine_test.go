@@ -2365,7 +2365,7 @@ func TestSSTScanAfterFileDeleted(t *testing.T) {
 
 	// Scan with the pre-opened handle — on Unix the inode is still alive
 	count := 0
-	iter := s.Iterator(key(0), key(100), f)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		count++
 	}
@@ -2411,7 +2411,7 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 
 	// Scan should stop early (read error) rather than panic
 	count := 0
-	iter := s.Iterator(key(0), key(100), f)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		count++
 	}

@@ -431,13 +431,16 @@ type mergeIterator struct {
 	sources []Iterator
 }
 
-func newMergeIterator(sources []Iterator) *mergeIterator {
+func newMergeIterator(sources []Iterator, reverse bool) *mergeIterator {
 	heap := newHeap(func(a mergeEntry, b mergeEntry) bool {
 		cmp := bytes.Compare(a.current.Key, b.current.Key)
+		if reverse {
+			cmp = -cmp
+		}
 		if cmp != 0 {
 			return cmp < 0
 		}
-		return a.index < b.index // lower index = newer source wins
+		return a.index < b.index
 	})
 
 	for idx, source := range sources {
@@ -466,13 +469,13 @@ func (it *mergeIterator) Next() bool {
 			})
 		}
 
-		// Skip duplicate keys — we already yielded from a newer source
+		// Skip duplicate user_keys — the first pop from the lowest-index
+		// (newest) source already yielded this key.
 		if it.started && bytes.Equal(entry.current.Key, it.current.Key) {
 			continue
 		}
 		it.current = entry.current
 		it.started = true
-
 		return true
 	}
 	return false
@@ -493,6 +496,14 @@ func (it *mergeIterator) Close() error {
 }
 
 func (e *Engine) Scan(lo Key, hi Key) Iterator {
+	return e.scanImpl(lo, hi, false)
+}
+
+func (e *Engine) ReverseScan(lo Key, hi Key) Iterator {
+	return e.scanImpl(lo, hi, true)
+}
+
+func (e *Engine) scanImpl(lo Key, hi Key, reverse bool) Iterator {
 	seqnum := e.seqnum.Load()
 	activeMemtable := e.memtable.Load()
 	l0ssts := *e.l0ssts.Load()
@@ -504,17 +515,17 @@ func (e *Engine) Scan(lo Key, hi Key) Iterator {
 		sources = append(sources, activeMemtable.Scan(lo, hi, seqnum))
 	}
 
-	scanIter := e.scan(lo, hi, nil, l0ssts, l1ssts)
+	scanIter := e.scan(lo, hi, nil, l0ssts, l1ssts, reverse)
 	sources = append(sources, scanIter)
 
 	if len(sources) == 1 {
 		return skipTombstones(sources[0])
 	}
 
-	return skipTombstones(newMergeIterator(sources))
+	return skipTombstones(newMergeIterator(sources, reverse))
 }
 
-func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts []*sst) Iterator {
+func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts []*sst, reverse bool) Iterator {
 	var sources []Iterator
 
 	if memtable != nil && memtable.Len() > 0 {
@@ -526,7 +537,7 @@ func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts 
 		if err != nil {
 			continue
 		}
-		sources = append(sources, s.Iterator(lo, hi, handle))
+		sources = append(sources, s.Iterator(lo, hi, handle, reverse))
 	}
 
 	// L1 SSTs are non-overlapping and sorted, so we walk them as a single
@@ -534,14 +545,14 @@ func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts 
 	if len(l1ssts) == 1 {
 		handle, err := e.fileTable.getOrOpen(l1ssts[0].path)
 		if err != nil {
-			return newMergeIterator(sources)
+			return newMergeIterator(sources, reverse)
 		}
-		sources = append(sources, l1ssts[0].Iterator(lo, hi, handle))
+		sources = append(sources, l1ssts[0].Iterator(lo, hi, handle, reverse))
 	} else if len(l1ssts) > 1 {
 		opener := func(s *sst) (reader, error) {
 			return e.fileTable.getOrOpen(s.path)
 		}
-		sources = append(sources, newSSTConcatIterator(l1ssts, lo, hi, opener))
+		sources = append(sources, newSSTConcatIterator(l1ssts, lo, hi, opener, reverse))
 	}
 
 	if len(sources) == 1 {
@@ -549,7 +560,7 @@ func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts 
 		return sources[0]
 	}
 
-	return newMergeIterator(sources)
+	return newMergeIterator(sources, reverse)
 }
 
 func (e *Engine) maybeFlush() error {
@@ -676,7 +687,7 @@ func (e *Engine) compactLocked() error {
 		}
 
 		// Merge l0 with all of l1ssts[first:last+1].
-		merged := e.scan(nil, nil, nil, []*sst{l0}, l1ssts[first:last+1])
+		merged := e.scan(nil, nil, nil, []*sst{l0}, l1ssts[first:last+1], false)
 		written, err := WriteSST(e.ObjectsPath(), merged, false)
 		merged.Close()
 		if err != nil {

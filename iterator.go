@@ -8,7 +8,9 @@ type KeyValue struct {
 }
 
 type Iterator interface {
-	// Next advances the iterator. Returns false when exhausted.
+	// Next advances the iterator one step in whichever direction was baked
+	// in at construction (forward for Scan, reverse for ReverseScan).
+	// Returns false when exhausted.
 	Next() bool
 	// Current returns the current key/value. Only valid after Next() returns true.
 	Current() KeyValue
