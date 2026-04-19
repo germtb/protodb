@@ -576,7 +576,9 @@ func (e *Engine) maybeFlush() error {
 	// Auto-flush triggers a background compaction. Manual Flush() does not —
 	// tests that inspect L0/L1 state immediately after Flush() rely on it
 	// being a synchronous, side-effect-free checkpoint.
-	if len(*e.l0ssts.Load()) > e.policy.SoftCompactionThreshold {
+	// A zero/negative soft threshold disables the auto-compaction path,
+	// matching the HardCompactionThreshold convention.
+	if soft := e.policy.SoftCompactionThreshold; soft > 0 && len(*e.l0ssts.Load()) > soft {
 		if e.compactionMutex.TryLock() {
 			go func() {
 				defer e.compactionMutex.Unlock()
@@ -838,9 +840,12 @@ func (e *Engine) Transaction() Transaction {
 	// Write stall: if L0 is too tall, force a synchronous compaction before
 	// accepting the write. compactionMutex serializes so at most one writer
 	// actually runs the compaction; others wait here and re-check after.
-	if len(*e.l0ssts.Load()) >= e.policy.HardCompactionThreshold {
+	// A zero/negative threshold disables the write stall entirely — without
+	// this guard a partially-populated Policy (missing HardCompactionThreshold)
+	// would fire on every Put, since 0 L0 SSTs satisfies `>= 0`.
+	if hard := e.policy.HardCompactionThreshold; hard > 0 && len(*e.l0ssts.Load()) >= hard {
 		e.compactionMutex.Lock()
-		if len(*e.l0ssts.Load()) >= e.policy.HardCompactionThreshold {
+		if len(*e.l0ssts.Load()) >= hard {
 			_ = e.compactLocked()
 		}
 		e.compactionMutex.Unlock()
