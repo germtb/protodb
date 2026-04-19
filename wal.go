@@ -244,9 +244,9 @@ func (wal *WAL) replay(table *memtable) (int, error) {
 	replayCommit := func() {
 		for _, entry := range entries {
 			if entry.Value == nil {
-				table.Delete(entry.Key)
+				table.Delete(entry.Key, 0)
 			} else {
-				table.Put(entry.Key, entry.Value)
+				table.Put(entry.Key, entry.Value, 0)
 			}
 		}
 		comittedOffset = offset

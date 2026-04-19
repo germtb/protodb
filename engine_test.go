@@ -969,8 +969,8 @@ func TestCompactAfterMultipleFlushes(t *testing.T) {
 	engine.Put(key(3), []byte("c"))
 	engine.Flush()
 
-	if len(engine.l0ssts) != 3 {
-		t.Fatalf("expected 3 SSTs before compact, got %d", len(engine.l0ssts))
+	if len(engine.L0SSTs()) != 3 {
+		t.Fatalf("expected 3 SSTs before compact, got %d", len(engine.L0SSTs()))
 	}
 
 	err := engine.Compact()
@@ -980,8 +980,8 @@ func TestCompactAfterMultipleFlushes(t *testing.T) {
 
 	// Each L0 SST holds a distinct non-overlapping key, so compaction
 	// trivial-moves each one to L1 without merging — 3 L1 SSTs.
-	if len(engine.l1ssts) != 3 {
-		t.Fatalf("expected 3 SSTs after compact, got %d", len(engine.l1ssts))
+	if len(engine.L1SSTs()) != 3 {
+		t.Fatalf("expected 3 SSTs after compact, got %d", len(engine.L1SSTs()))
 	}
 
 	for k, want := range map[uint64]string{1: "a", 2: "b", 3: "c"} {
@@ -1362,10 +1362,10 @@ func TestDeleteThenCompactDropsTombstones(t *testing.T) {
 
 	// After compaction, the single resulting SST should have no tombstone for key 2.
 	// Verify by checking the SST has only 2 keys.
-	if len(engine.l1ssts) != 1 {
-		t.Fatalf("expected 1 SST after compact, got %d", len(engine.l1ssts))
+	if len(engine.L1SSTs()) != 1 {
+		t.Fatalf("expected 1 SST after compact, got %d", len(engine.L1SSTs()))
 	}
-	if engine.l1ssts[0].footer.BlockCount == 0 {
+	if engine.L1SSTs()[0].footer.BlockCount == 0 {
 		t.Errorf("expected at least 1 block after compact, got 0")
 	}
 
@@ -1398,8 +1398,8 @@ func TestDeleteAllThenCompact(t *testing.T) {
 	}
 
 	// All entries were deleted, so compact should produce no SSTs
-	if len(engine.l1ssts) != 0 {
-		t.Fatalf("expected 0 SSTs after compact (all deleted), got %d", len(engine.l1ssts))
+	if len(engine.L1SSTs()) != 0 {
+		t.Fatalf("expected 0 SSTs after compact (all deleted), got %d", len(engine.L1SSTs()))
 	}
 }
 
@@ -1579,7 +1579,7 @@ func TestOpenWithMissingSST(t *testing.T) {
 	}
 
 	// Delete the SST file from the objects directory
-	sstPath := filepath.Join(dir, "protodb", "objects", engine.l0ssts[0].hash)
+	sstPath := filepath.Join(dir, "protodb", "objects", engine.L0SSTs()[0].hash)
 	err = os.Remove(sstPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1606,7 +1606,7 @@ func TestOpenWithCorruptSST(t *testing.T) {
 	}
 
 	// Corrupt the SST file in the objects directory
-	sstPath := filepath.Join(dir, "protodb", "objects", engine.l0ssts[0].hash)
+	sstPath := filepath.Join(dir, "protodb", "objects", engine.L0SSTs()[0].hash)
 	err = os.WriteFile(sstPath, []byte("garbage"), 0644)
 	if err != nil {
 		t.Fatal(err)
@@ -1655,8 +1655,8 @@ func TestCompactDeletesOldSSTs(t *testing.T) {
 	engine.Flush()
 
 	// Before compact, there should be 2 SSTs
-	oldHashes := make([]string, len(engine.l0ssts))
-	for idx, s := range engine.l0ssts {
+	oldHashes := make([]string, len(engine.L0SSTs()))
+	for idx, s := range engine.L0SSTs() {
 		oldHashes[idx] = s.hash
 		sstPath := filepath.Join(engine.ObjectsPath(), s.hash)
 		if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
@@ -1671,7 +1671,7 @@ func TestCompactDeletesOldSSTs(t *testing.T) {
 
 	// New compacted SSTs should exist
 	_ = oldHashes // GC of old objects is separate
-	for _, s := range engine.l1ssts {
+	for _, s := range engine.L1SSTs() {
 		sstPath := filepath.Join(engine.ObjectsPath(), s.hash)
 		if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
 			t.Errorf("expected compacted SST at %s", sstPath)
@@ -1972,7 +1972,7 @@ func TestCompactCreatesObjectFiles(t *testing.T) {
 	}
 
 	// Each SST should have a file in the objects directory
-	for _, s := range engine.l1ssts {
+	for _, s := range engine.L1SSTs() {
 		sstPath := filepath.Join(engine.ObjectsPath(), s.hash)
 		if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
 			t.Errorf("expected SST file at %s", sstPath)
@@ -2055,8 +2055,8 @@ func TestCompactMultipleCyclesCleanup(t *testing.T) {
 
 	// Each cycle writes a distinct non-overlapping key, so trivial move
 	// promotes the L0 SST to L1 without merging — one L1 SST per cycle.
-	if len(engine.l1ssts) != 3 {
-		t.Errorf("expected 3 SSTs in engine after compactions, got %d", len(engine.l1ssts))
+	if len(engine.L1SSTs()) != 3 {
+		t.Errorf("expected 3 SSTs in engine after compactions, got %d", len(engine.L1SSTs()))
 	}
 }
 
@@ -2185,7 +2185,7 @@ func TestFlushAfterCompactWritesToObjects(t *testing.T) {
 	engine.Flush()
 
 	// The new SST should be in the objects directory
-	lastSST := engine.l0ssts[len(engine.l0ssts)-1]
+	lastSST := engine.L0SSTs()[len(engine.L0SSTs())-1]
 	sstPath := filepath.Join(engine.ObjectsPath(), lastSST.hash)
 	if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
 		t.Errorf("expected SST at %s after flush post-compact", sstPath)
@@ -2217,8 +2217,8 @@ func TestCompactLargeDataSet(t *testing.T) {
 		engine.Flush()
 	}
 
-	if len(engine.l0ssts) != 10 {
-		t.Fatalf("expected 10 SSTs before compact, got %d", len(engine.l0ssts))
+	if len(engine.L0SSTs()) != 10 {
+		t.Fatalf("expected 10 SSTs before compact, got %d", len(engine.L0SSTs()))
 	}
 
 	err := engine.Compact()
@@ -2228,8 +2228,8 @@ func TestCompactLargeDataSet(t *testing.T) {
 
 	// Each L0 SST holds a distinct non-overlapping key range (100*batch to
 	// 100*batch+99), so compaction trivial-moves each one to L1 — 10 L1 SSTs.
-	if len(engine.l1ssts) != 10 {
-		t.Fatalf("expected 10 SSTs after compact, got %d", len(engine.l1ssts))
+	if len(engine.L1SSTs()) != 10 {
+		t.Fatalf("expected 10 SSTs after compact, got %d", len(engine.L1SSTs()))
 	}
 
 	// Verify all keys
@@ -2274,7 +2274,7 @@ func TestCompactLargeWithOverwrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if engine.l1ssts[0].footer.BlockCount == 0 {
+	if engine.L1SSTs()[0].footer.BlockCount == 0 {
 		t.Errorf("expected at least 1 block after compact, got 0")
 	}
 
@@ -2527,7 +2527,7 @@ func TestEngineGetAfterSSTDeleted(t *testing.T) {
 	engine.Flush()
 
 	// Delete the SST file
-	sstPath := filepath.Join(dir, "protodb", "objects", engine.l0ssts[0].hash)
+	sstPath := filepath.Join(dir, "protodb", "objects", engine.L0SSTs()[0].hash)
 	os.Remove(sstPath)
 
 	// Get should return an error (not panic)
@@ -3311,7 +3311,7 @@ func TestAdversarialSSTDeletedWhileRunning(t *testing.T) {
 	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 
-	sstPath := filepath.Join(dir, "protodb", "objects", engine.l0ssts[0].hash)
+	sstPath := filepath.Join(dir, "protodb", "objects", engine.L0SSTs()[0].hash)
 	os.Remove(sstPath)
 
 	// Should not panic
@@ -3864,8 +3864,8 @@ func TestPartitionedFlush(t *testing.T) {
 	}
 	engine.Flush()
 
-	if len(engine.l0ssts) < 2 {
-		t.Fatalf("expected multiple SSTs from flush, got %d", len(engine.l0ssts))
+	if len(engine.L0SSTs()) < 2 {
+		t.Fatalf("expected multiple SSTs from flush, got %d", len(engine.L0SSTs()))
 	}
 
 	// All keys should be readable
@@ -3910,16 +3910,16 @@ func TestPartitionedCompact(t *testing.T) {
 	}
 	engine.Flush()
 
-	sstsBefore := len(engine.l0ssts)
+	sstsBefore := len(engine.L0SSTs())
 	engine.Compact()
 
-	if len(engine.l1ssts) < 2 {
-		t.Fatalf("expected multiple SSTs after compact, got %d", len(engine.l1ssts))
+	if len(engine.L1SSTs()) < 2 {
+		t.Fatalf("expected multiple SSTs after compact, got %d", len(engine.L1SSTs()))
 	}
 
 	// Compaction should produce the same number of partitions (same data, same size limit)
-	if len(engine.l1ssts) != sstsBefore {
-		t.Logf("SSTs before compact: %d, after: %d", sstsBefore, len(engine.l1ssts))
+	if len(engine.L1SSTs()) != sstsBefore {
+		t.Logf("SSTs before compact: %d, after: %d", sstsBefore, len(engine.L1SSTs()))
 	}
 
 	// All keys should be readable
@@ -3956,8 +3956,8 @@ func TestPartitionedCompactThenReopen(t *testing.T) {
 	}
 	defer engine.Close()
 
-	if len(engine.l1ssts) < 2 {
-		t.Fatalf("expected multiple SSTs after reopen, got %d", len(engine.l1ssts))
+	if len(engine.L1SSTs()) < 2 {
+		t.Fatalf("expected multiple SSTs after reopen, got %d", len(engine.L1SSTs()))
 	}
 
 	for idx := uint64(0); idx < 200; idx++ {
@@ -4549,8 +4549,8 @@ func TestCorruptedBlockChecksumOnGet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sstPath := engine.l1ssts[0].path
-	blockEnd := int(engine.l1ssts[0].blocks[0].Offset + uint64(engine.l1ssts[0].blocks[0].Length))
+	sstPath := engine.L1SSTs()[0].path
+	blockEnd := int(engine.L1SSTs()[0].blocks[0].Offset + uint64(engine.L1SSTs()[0].blocks[0].Length))
 	engine.Close()
 
 	// Corrupt a byte inside the first data block
@@ -4594,8 +4594,8 @@ func TestCorruptedBlockChecksumOnScan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sstPath := engine.l1ssts[0].path
-	blockEnd := int(engine.l1ssts[0].blocks[0].Offset + uint64(engine.l1ssts[0].blocks[0].Length))
+	sstPath := engine.L1SSTs()[0].path
+	blockEnd := int(engine.L1SSTs()[0].blocks[0].Offset + uint64(engine.L1SSTs()[0].blocks[0].Length))
 	engine.Close()
 
 	// Corrupt a byte inside the first data block
@@ -4707,7 +4707,7 @@ func TestZeroLengthSSTFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sstPath := engine.l0ssts[0].path
+	sstPath := engine.L0SSTs()[0].path
 	engine.Close()
 
 	// Replace the SST file with a zero-length file
@@ -4734,7 +4734,7 @@ func TestSSTWithValidFooterButCorruptedBlockIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sstPath := engine.l0ssts[0].path
+	sstPath := engine.L0SSTs()[0].path
 	engine.Close()
 
 	// Corrupt the block index area (between blocks and footer)
@@ -5675,8 +5675,8 @@ func TestDoubleCompactVerifiesL0EmptyAndOverwrite(t *testing.T) {
 	}
 
 	// Verify L0 is empty after first compact.
-	if len(engine.l0ssts) != 0 {
-		t.Errorf("L0 should have 0 SSTs after compact, got %d", len(engine.l0ssts))
+	if len(engine.L0SSTs()) != 0 {
+		t.Errorf("L0 should have 0 SSTs after compact, got %d", len(engine.L0SSTs()))
 	}
 	if len(engine.manifest.L0Hashes()) != 0 {
 		t.Errorf("L0 manifest should have 0 hashes after compact, got %d", len(engine.manifest.L0Hashes()))
@@ -5696,8 +5696,8 @@ func TestDoubleCompactVerifiesL0EmptyAndOverwrite(t *testing.T) {
 	}
 
 	// Verify L0 is empty after second compact.
-	if len(engine.l0ssts) != 0 {
-		t.Errorf("L0 should have 0 SSTs after second compact, got %d", len(engine.l0ssts))
+	if len(engine.L0SSTs()) != 0 {
+		t.Errorf("L0 should have 0 SSTs after second compact, got %d", len(engine.L0SSTs()))
 	}
 	if len(engine.manifest.L0Hashes()) != 0 {
 		t.Errorf("L0 manifest should have 0 hashes after second compact, got %d", len(engine.manifest.L0Hashes()))
@@ -5961,4 +5961,178 @@ func TestCompactCleansUpOrphans(t *testing.T) {
 			t.Fatalf("Get(%d) = %q, want %q", i, got, expected)
 		}
 	}
+}
+
+// Writes that happen after a Scan is constructed must not be observed by that
+// scan — the iterator's view is pinned at the visibleSeqnum captured when Scan
+// was called.
+func TestScanSnapshotIsolation(t *testing.T) {
+	engine := openTestEngine(t)
+
+	for i := uint64(0); i < 5; i++ {
+		if err := engine.Put(key(i), []byte(fmt.Sprintf("v%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	iter := engine.Scan(nil, nil)
+	defer iter.Close()
+
+	// Writes after the scan was constructed are invisible to the iterator.
+	for i := uint64(5); i < 10; i++ {
+		if err := engine.Put(key(i), []byte(fmt.Sprintf("v%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var seen []uint64
+	for iter.Next() {
+		seen = append(seen, binary.BigEndian.Uint64(iter.Current().Key))
+	}
+
+	if len(seen) != 5 {
+		t.Fatalf("scan yielded %d entries, want 5 (post-scan writes leaked)", len(seen))
+	}
+	for i, k := range seen {
+		if k != uint64(i) {
+			t.Fatalf("seen[%d] = %d, want %d", i, k, i)
+		}
+	}
+}
+
+// Overwrites of the same key after Scan is constructed must not shift the
+// returned value — the iterator should show the pre-scan version.
+func TestScanSnapshotSeesOldValue(t *testing.T) {
+	engine := openTestEngine(t)
+
+	if err := engine.Put(key(1), []byte("before")); err != nil {
+		t.Fatal(err)
+	}
+
+	iter := engine.Scan(nil, nil)
+	defer iter.Close()
+
+	if err := engine.Put(key(1), []byte("after")); err != nil {
+		t.Fatal(err)
+	}
+
+	if !iter.Next() {
+		t.Fatal("expected one entry")
+	}
+	got := string(iter.Current().Value)
+	if got != "before" {
+		t.Fatalf("scan saw %q, want %q (snapshot should pin pre-scan value)", got, "before")
+	}
+	if iter.Next() {
+		t.Fatalf("unexpected extra entry: %v", iter.Current())
+	}
+}
+
+// A scan created before a flush must still yield all of its pre-scan entries
+// even after the flush swaps the memtable. Correctness relies on the
+// iterator's captured skipnode pointer (kept alive by GC) plus the L0 update
+// happening before the memtable swap.
+func TestScanSurvivesFlush(t *testing.T) {
+	engine := openTestEngine(t)
+
+	for i := uint64(0); i < 100; i++ {
+		if err := engine.Put(key(i), []byte(fmt.Sprintf("v%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	iter := engine.Scan(nil, nil)
+	defer iter.Close()
+
+	// Consume the first entry so iteration is actively in progress when the
+	// flush lands, not just pinned at creation.
+	if !iter.Next() {
+		t.Fatal("expected first entry")
+	}
+	if got := binary.BigEndian.Uint64(iter.Current().Key); got != 0 {
+		t.Fatalf("first key: got %d, want 0", got)
+	}
+
+	// Flush: writes SST, publishes new L0, swaps memtable to empty. The scan's
+	// captured skipnode keeps the old skiplist's forward chain alive via GC.
+	if err := engine.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := []uint64{0}
+	for iter.Next() {
+		seen = append(seen, binary.BigEndian.Uint64(iter.Current().Key))
+	}
+	if len(seen) != 100 {
+		t.Fatalf("scan yielded %d entries, want 100", len(seen))
+	}
+	for i, k := range seen {
+		if k != uint64(i) {
+			t.Fatalf("seen[%d] = %d, want %d", i, k, i)
+		}
+	}
+
+	// After the scan closes, a fresh engine.Get must still work via the new
+	// SST (the memtable has been emptied).
+	got, err := engine.Get(key(42))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "v42" {
+		t.Fatalf("post-flush Get: got %q, want v42", got)
+	}
+}
+
+// BulkGet captures a single snapshot at entry so all keys in the batch see
+// the same view, even if writes interleave with the internal loop.
+func TestBulkGetSnapshotConsistent(t *testing.T) {
+	engine := openTestEngine(t)
+
+	for i := uint64(0); i < 10; i++ {
+		if err := engine.Put(key(i), []byte("v0")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Launch a writer that hammers all keys with a new value while BulkGet is
+	// in flight. We don't assert which value BulkGet returns — just that every
+	// key gets *some* value (no nil holes from half-applied writes).
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for round := 0; ; round++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for i := uint64(0); i < 10; i++ {
+				engine.Put(key(i), []byte(fmt.Sprintf("r%d", round)))
+			}
+		}
+	}()
+
+	keys := make([]Key, 10)
+	for i := uint64(0); i < 10; i++ {
+		keys[i] = key(i)
+	}
+	for attempt := 0; attempt < 200; attempt++ {
+		results, err := engine.BulkGet(keys)
+		if err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatal(err)
+		}
+		for i, v := range results {
+			if v == nil {
+				close(stop)
+				wg.Wait()
+				t.Fatalf("attempt %d key %d: nil result under concurrent writes", attempt, i)
+			}
+		}
+	}
+	close(stop)
+	wg.Wait()
 }

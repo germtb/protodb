@@ -14,30 +14,90 @@ func BenchmarkMemtablePut(b *testing.B) {
 	v := []byte("value")
 	b.ResetTimer()
 	for iter := 0; iter < b.N; iter++ {
-		m.Put(k, v)
+		m.Put(k, v, uint32(iter+1))
+	}
+}
+
+func BenchmarkSkiplistPut(b *testing.B) {
+	sl := NewSkiplist()
+	k := key(42)
+	v := []byte("value")
+	b.ResetTimer()
+	for iter := 0; iter < b.N; iter++ {
+		sl.Put(k, v, uint32(iter+1))
+	}
+}
+
+func BenchmarkSkiplistPutSequential(b *testing.B) {
+	sl := NewSkiplist()
+	v := []byte("value")
+	b.ResetTimer()
+	for iter := 0; iter < b.N; iter++ {
+		sl.Put(key(uint64(iter)), v, uint32(iter+1))
+	}
+}
+
+func BenchmarkMemtablePutSequential(b *testing.B) {
+	m := newMemtable()
+	v := []byte("value")
+	b.ResetTimer()
+	for iter := 0; iter < b.N; iter++ {
+		m.Put(key(uint64(iter)), v, uint32(iter+1))
+	}
+}
+
+func BenchmarkSkiplistPut100K(b *testing.B) {
+	v := make([]byte, 200)
+	for iter := 0; iter < b.N; iter++ {
+		sl := NewSkiplist()
+		for i := 0; i < 100_000; i++ {
+			sl.Put(key(uint64(i)), v, uint32(i+1))
+		}
+	}
+}
+
+func BenchmarkMemtablePut100K(b *testing.B) {
+	v := make([]byte, 200)
+	for iter := 0; iter < b.N; iter++ {
+		m := newMemtable()
+		for i := 0; i < 100_000; i++ {
+			m.Put(key(uint64(i)), v, uint32(i+1))
+		}
+	}
+}
+
+func BenchmarkSkiplistGet(b *testing.B) {
+	sl := NewSkiplist()
+	for idx := uint64(0); idx < 10000; idx++ {
+		sl.Put(key(idx), []byte("value"), uint32(idx+1))
+	}
+	k := key(5000)
+	b.ResetTimer()
+	for iter := 0; iter < b.N; iter++ {
+		sl.Get(k, VisibleAll)
 	}
 }
 
 func BenchmarkMemtableGet(b *testing.B) {
 	m := newMemtable()
 	for idx := uint64(0); idx < 10000; idx++ {
-		m.Put(key(idx), []byte("value"))
+		m.Put(key(idx), []byte("value"), uint32(idx+1))
 	}
 	k := key(5000)
 	b.ResetTimer()
 	for iter := 0; iter < b.N; iter++ {
-		m.Get(k)
+		m.Get(k, VisibleAll)
 	}
 }
 
 func BenchmarkMemtableGetWithKeyAlloc(b *testing.B) {
 	m := newMemtable()
 	for idx := uint64(0); idx < 10000; idx++ {
-		m.Put(key(idx), []byte("value"))
+		m.Put(key(idx), []byte("value"), uint32(idx+1))
 	}
 	b.ResetTimer()
 	for iter := 0; iter < b.N; iter++ {
-		m.Get(key(uint64(iter) % 10000))
+		m.Get(key(uint64(iter)%10000), VisibleAll)
 	}
 }
 
@@ -161,4 +221,51 @@ func BenchmarkSSTGetWithKeyAlloc(b *testing.B) {
 
 func openFile(s *sst) (*os.File, error) {
 	return os.Open(s.path)
+}
+
+// BenchmarkEnginePut measures end-to-end write throughput, including WAL
+// append and commit-loop overhead. No flush in the loop.
+func BenchmarkEnginePut(b *testing.B) {
+	engine, err := Open(b.TempDir())
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer engine.Close()
+	v := []byte("value")
+	b.ResetTimer()
+	for iter := 0; iter < b.N; iter++ {
+		engine.Put(key(uint64(iter)), v)
+	}
+}
+
+// BenchmarkEngineGetMemtable measures Get against a 10k-key memtable (no SSTs).
+func BenchmarkEngineGetMemtable(b *testing.B) {
+	engine, err := Open(b.TempDir())
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer engine.Close()
+	for idx := uint64(0); idx < 10000; idx++ {
+		engine.Put(key(idx), []byte("value"))
+	}
+	b.ResetTimer()
+	for iter := 0; iter < b.N; iter++ {
+		engine.Get(key(uint64(iter) % 10000))
+	}
+}
+
+// BenchmarkEnginePutSameKey hammers a single key — worst case for the
+// append-only skiplist since every version accumulates until flush.
+func BenchmarkEnginePutSameKey(b *testing.B) {
+	engine, err := Open(b.TempDir())
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer engine.Close()
+	k := key(42)
+	v := []byte("value")
+	b.ResetTimer()
+	for iter := 0; iter < b.N; iter++ {
+		engine.Put(k, v)
+	}
 }

@@ -13,11 +13,21 @@ func key(k uint64) []byte {
 	return buf
 }
 
+// seqGen returns a fresh monotonic seqnum generator for a test.
+func seqGen() func() uint32 {
+	var s uint32
+	return func() uint32 {
+		s++
+		return s
+	}
+}
+
 func TestPutAndGet(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("hello"))
+	seq := seqGen()
+	m.Put(key(1), []byte("hello"), seq())
 
-	got, err := m.Get(key(1))
+	got, err := m.Get(key(1), VisibleAll)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -28,7 +38,7 @@ func TestPutAndGet(t *testing.T) {
 
 func TestGetMissing(t *testing.T) {
 	m := newMemtable()
-	_, err := m.Get(key(99))
+	_, err := m.Get(key(99), VisibleAll)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get(99): expected ErrNotFound, got %v", err)
 	}
@@ -36,24 +46,31 @@ func TestGetMissing(t *testing.T) {
 
 func TestPutOverwrite(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("first"))
-	m.Put(key(1), []byte("second"))
+	seq := seqGen()
+	m.Put(key(1), []byte("first"), seq())
+	m.Put(key(1), []byte("second"), seq())
 
-	got, err := m.Get(key(1))
+	got, err := m.Get(key(1), VisibleAll)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
 	if string(got) != "second" {
 		t.Errorf("Get(1): got %q, want %q", got, "second")
 	}
+
+	// Both versions are stored — the skiplist is append-only.
+	if m.Len() != 2 {
+		t.Errorf("Len: got %d, want 2 (both versions preserved)", m.Len())
+	}
 }
 
 func TestDeleteThenGet(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("hello"))
-	m.Delete(key(1))
+	seq := seqGen()
+	m.Put(key(1), []byte("hello"), seq())
+	m.Delete(key(1), seq())
 
-	_, err := m.Get(key(1))
+	_, err := m.Get(key(1), VisibleAll)
 	if !errors.Is(err, ErrDeleted) {
 		t.Fatalf("Get(1) after Delete: expected ErrDeleted, got %v", err)
 	}
@@ -61,7 +78,8 @@ func TestDeleteThenGet(t *testing.T) {
 
 func TestDeleteNonexistent(t *testing.T) {
 	m := newMemtable()
-	m.Delete(key(99))
+	seq := seqGen()
+	m.Delete(key(99), seq())
 
 	if m.Len() != 1 {
 		t.Errorf("Len: got %d, want 1 (tombstone stored)", m.Len())
@@ -73,41 +91,52 @@ func TestDeleteNonexistent(t *testing.T) {
 
 func TestDeleteTwice(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("hello"))
-	m.Delete(key(1))
-	m.Delete(key(1))
+	seq := seqGen()
+	m.Put(key(1), []byte("hello"), seq())
+	m.Delete(key(1), seq())
+	m.Delete(key(1), seq())
 
-	if m.ByteSize() != 8 {
-		t.Errorf("ByteSize: got %d, want 8 (key only)", m.ByteSize())
+	// 3 entries: one put ("hello" = 5) plus two tombstones. 3*8 keys + 5 = 29.
+	if m.ByteSize() != 29 {
+		t.Errorf("ByteSize: got %d, want 29", m.ByteSize())
+	}
+
+	_, err := m.Get(key(1), VisibleAll)
+	if !errors.Is(err, ErrDeleted) {
+		t.Fatalf("Get(1): expected ErrDeleted, got %v", err)
 	}
 }
 
 func TestPutDeletePut(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("first"))
-	m.Delete(key(1))
-	m.Put(key(1), []byte("second"))
+	seq := seqGen()
+	m.Put(key(1), []byte("first"), seq())
+	m.Delete(key(1), seq())
+	m.Put(key(1), []byte("second"), seq())
 
-	got, err := m.Get(key(1))
+	got, err := m.Get(key(1), VisibleAll)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
 	if string(got) != "second" {
 		t.Errorf("Get(1): got %q, want %q", got, "second")
 	}
-	if m.ByteSize() != 14 {
-		t.Errorf("ByteSize: got %d, want 14 (8 key + 6 value)", m.ByteSize())
+	// 3 entries: put("first"), tombstone, put("second").
+	// Size = 3*8 (keys) + 5 ("first") + 0 (tombstone) + 6 ("second") = 35.
+	if m.ByteSize() != 35 {
+		t.Errorf("ByteSize: got %d, want 35", m.ByteSize())
 	}
 }
 
 func TestByteSizePut(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("abc"))
+	seq := seqGen()
+	m.Put(key(1), []byte("abc"), seq())
 	if m.ByteSize() != 11 {
 		t.Errorf("ByteSize: got %d, want 11 (8 key + 3 value)", m.ByteSize())
 	}
 
-	m.Put(key(2), []byte("de"))
+	m.Put(key(2), []byte("de"), seq())
 	if m.ByteSize() != 21 {
 		t.Errorf("ByteSize: got %d, want 21 (2*8 key + 3+2 value)", m.ByteSize())
 	}
@@ -115,29 +144,34 @@ func TestByteSizePut(t *testing.T) {
 
 func TestByteSizeOverwrite(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("abc"))
-	m.Put(key(1), []byte("defgh"))
+	seq := seqGen()
+	m.Put(key(1), []byte("abc"), seq())
+	m.Put(key(1), []byte("defgh"), seq())
 
-	if m.ByteSize() != 13 {
-		t.Errorf("ByteSize: got %d, want 13 (8 key + 5 value)", m.ByteSize())
+	// Both versions stored: 2*8 (keys) + 3 + 5 = 24.
+	if m.ByteSize() != 24 {
+		t.Errorf("ByteSize: got %d, want 24", m.ByteSize())
 	}
 }
 
 func TestByteSizeDelete(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("abc"))
-	m.Delete(key(1))
+	seq := seqGen()
+	m.Put(key(1), []byte("abc"), seq())
+	m.Delete(key(1), seq())
 
-	if m.ByteSize() != 8 {
-		t.Errorf("ByteSize: got %d, want 8 (key only, tombstone)", m.ByteSize())
+	// 2 entries: put + tombstone. 2*8 (keys) + 3 ("abc") + 0 = 19.
+	if m.ByteSize() != 19 {
+		t.Errorf("ByteSize: got %d, want 19", m.ByteSize())
 	}
 }
 
 func TestPutNilIsTombstone(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), nil)
+	seq := seqGen()
+	m.Put(key(1), nil, seq())
 
-	_, err := m.Get(key(1))
+	_, err := m.Get(key(1), VisibleAll)
 	if !errors.Is(err, ErrDeleted) {
 		t.Fatalf("Get(1) after Put(nil): expected ErrDeleted, got %v", err)
 	}
@@ -151,9 +185,10 @@ func TestPutNilIsTombstone(t *testing.T) {
 
 func TestPutEmptyValue(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte{})
+	seq := seqGen()
+	m.Put(key(1), []byte{}, seq())
 
-	got, err := m.Get(key(1))
+	got, err := m.Get(key(1), VisibleAll)
 	if err != nil {
 		t.Fatalf("Get(1): %v", err)
 	}
@@ -171,9 +206,10 @@ func TestLenEmpty(t *testing.T) {
 
 func TestLenAfterPuts(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("a"))
-	m.Put(key(2), []byte("b"))
-	m.Put(key(3), []byte("c"))
+	seq := seqGen()
+	m.Put(key(1), []byte("a"), seq())
+	m.Put(key(2), []byte("b"), seq())
+	m.Put(key(3), []byte("c"), seq())
 
 	if m.Len() != 3 {
 		t.Errorf("Len: got %d, want 3", m.Len())
@@ -182,25 +218,27 @@ func TestLenAfterPuts(t *testing.T) {
 
 func TestLenAfterDelete(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("a"))
-	m.Delete(key(1))
+	seq := seqGen()
+	m.Put(key(1), []byte("a"), seq())
+	m.Delete(key(1), seq())
 
-	// Tombstone is still an entry
-	if m.Len() != 1 {
-		t.Errorf("Len: got %d, want 1", m.Len())
+	// Put and tombstone are both entries.
+	if m.Len() != 2 {
+		t.Errorf("Len: got %d, want 2", m.Len())
 	}
 }
 
 func TestScanRange(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("a"))
-	m.Put(key(2), []byte("b"))
-	m.Put(key(3), []byte("c"))
-	m.Put(key(4), []byte("d"))
-	m.Put(key(5), []byte("e"))
+	seq := seqGen()
+	m.Put(key(1), []byte("a"), seq())
+	m.Put(key(2), []byte("b"), seq())
+	m.Put(key(3), []byte("c"), seq())
+	m.Put(key(4), []byte("d"), seq())
+	m.Put(key(5), []byte("e"), seq())
 
 	var keys [][]byte
-	iter := m.Scan(key(2), key(5))
+	iter := m.Scan(key(2), key(5), VisibleAll)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 	}
@@ -212,14 +250,15 @@ func TestScanRange(t *testing.T) {
 
 func TestMemtableScanYieldsTombstones(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("a"))
-	m.Put(key(2), []byte("b"))
-	m.Put(key(3), []byte("c"))
-	m.Delete(key(2))
+	seq := seqGen()
+	m.Put(key(1), []byte("a"), seq())
+	m.Put(key(2), []byte("b"), seq())
+	m.Put(key(3), []byte("c"), seq())
+	m.Delete(key(2), seq())
 
 	var keys [][]byte
 	var tombstones [][]byte
-	iter := m.Scan(key(1), key(4))
+	iter := m.Scan(key(1), key(4), VisibleAll)
 	for iter.Next() {
 		k := iter.Current().Key
 		v := iter.Current().Value
@@ -241,7 +280,7 @@ func TestScanEmpty(t *testing.T) {
 	m := newMemtable()
 
 	var count int = 0
-	iter := m.Scan(key(0), key(100))
+	iter := m.Scan(key(0), key(100), VisibleAll)
 	for iter.Next() {
 		count++
 	}
@@ -252,11 +291,12 @@ func TestScanEmpty(t *testing.T) {
 
 func TestMemtableScanNoMatch(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("a"))
-	m.Put(key(2), []byte("b"))
+	seq := seqGen()
+	m.Put(key(1), []byte("a"), seq())
+	m.Put(key(2), []byte("b"), seq())
 
 	var count int = 0
-	iter := m.Scan(key(10), key(20))
+	iter := m.Scan(key(10), key(20), VisibleAll)
 	for iter.Next() {
 		count++
 	}
@@ -267,10 +307,11 @@ func TestMemtableScanNoMatch(t *testing.T) {
 
 func TestScanLoEqualsHi(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(5), []byte("a"))
+	seq := seqGen()
+	m.Put(key(5), []byte("a"), seq())
 
 	var count int = 0
-	iter := m.Scan(key(5), key(5))
+	iter := m.Scan(key(5), key(5), VisibleAll)
 	for iter.Next() {
 		count++
 	}
@@ -281,13 +322,14 @@ func TestScanLoEqualsHi(t *testing.T) {
 
 func TestScanBoundaries(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("a"))
-	m.Put(key(2), []byte("b"))
-	m.Put(key(3), []byte("c"))
+	seq := seqGen()
+	m.Put(key(1), []byte("a"), seq())
+	m.Put(key(2), []byte("b"), seq())
+	m.Put(key(3), []byte("c"), seq())
 
 	// lo is inclusive
 	var keys [][]byte
-	iter := m.Scan(key(1), key(3))
+	iter := m.Scan(key(1), key(3), VisibleAll)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 	}
@@ -298,12 +340,13 @@ func TestScanBoundaries(t *testing.T) {
 
 func TestScanBreak(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("a"))
-	m.Put(key(2), []byte("b"))
-	m.Put(key(3), []byte("c"))
+	seq := seqGen()
+	m.Put(key(1), []byte("a"), seq())
+	m.Put(key(2), []byte("b"), seq())
+	m.Put(key(3), []byte("c"), seq())
 
 	var keys [][]byte
-	iter := m.Scan(key(1), key(4))
+	iter := m.Scan(key(1), key(4), VisibleAll)
 	for iter.Next() {
 		k := iter.Current().Key
 		keys = append(keys, k)
@@ -318,9 +361,10 @@ func TestScanBreak(t *testing.T) {
 
 func TestEntriesOrder(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(3), []byte("c"))
-	m.Put(key(1), []byte("a"))
-	m.Put(key(2), []byte("b"))
+	seq := seqGen()
+	m.Put(key(3), []byte("c"), seq())
+	m.Put(key(1), []byte("a"), seq())
+	m.Put(key(2), []byte("b"), seq())
 
 	var keys [][]byte
 	iter := m.Entries()
@@ -335,10 +379,11 @@ func TestEntriesOrder(t *testing.T) {
 
 func TestEntriesIncludesTombstones(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("a"))
-	m.Put(key(2), []byte("b"))
-	m.Delete(key(2))
-	m.Put(key(3), []byte("c"))
+	seq := seqGen()
+	m.Put(key(1), []byte("a"), seq())
+	m.Put(key(2), []byte("b"), seq())
+	m.Delete(key(2), seq())
+	m.Put(key(3), []byte("c"), seq())
 
 	var keys [][]byte
 	var tombstones [][]byte
@@ -375,9 +420,10 @@ func TestEntriesEmpty(t *testing.T) {
 
 func TestEntriesBreak(t *testing.T) {
 	m := newMemtable()
-	m.Put(key(1), []byte("a"))
-	m.Put(key(2), []byte("b"))
-	m.Put(key(3), []byte("c"))
+	seq := seqGen()
+	m.Put(key(1), []byte("a"), seq())
+	m.Put(key(2), []byte("b"), seq())
+	m.Put(key(3), []byte("c"), seq())
 
 	var keys [][]byte
 	iter := m.Entries()
@@ -395,8 +441,9 @@ func TestEntriesBreak(t *testing.T) {
 
 func TestManyEntries(t *testing.T) {
 	m := newMemtable()
+	seq := seqGen()
 	for idx := uint64(0); idx < 1000; idx++ {
-		m.Put(key(idx), []byte("value"))
+		m.Put(key(idx), []byte("value"), seq())
 	}
 
 	if m.Len() != 1000 {
@@ -406,11 +453,54 @@ func TestManyEntries(t *testing.T) {
 		t.Errorf("ByteSize: got %d, want 13000 (1000 * (8 key + 5 value))", m.ByteSize())
 	}
 
-	got, err := m.Get(key(500))
+	got, err := m.Get(key(500), VisibleAll)
 	if err != nil {
 		t.Fatalf("Get(500): %v", err)
 	}
 	if string(got) != "value" {
 		t.Errorf("Get(500): got %q, want %q", got, "value")
+	}
+}
+
+func TestSnapshotScan(t *testing.T) {
+	m := newMemtable()
+	// Three versions of key(1): v1@1, v2@2, tombstone@3.
+	m.Put(key(1), []byte("v1"), 1)
+	m.Put(key(1), []byte("v2"), 2)
+	m.Delete(key(1), 3)
+
+	// Snapshot at seq=1 sees only v1.
+	got, err := m.Get(key(1), 1)
+	if err != nil {
+		t.Fatalf("Get@1: %v", err)
+	}
+	if string(got) != "v1" {
+		t.Errorf("Get@1: got %q, want v1", got)
+	}
+
+	// Snapshot at seq=2 sees v2 (newest visible).
+	got, err = m.Get(key(1), 2)
+	if err != nil {
+		t.Fatalf("Get@2: %v", err)
+	}
+	if string(got) != "v2" {
+		t.Errorf("Get@2: got %q, want v2", got)
+	}
+
+	// Snapshot at seq=3 sees the tombstone.
+	_, err = m.Get(key(1), 3)
+	if !errors.Is(err, ErrDeleted) {
+		t.Fatalf("Get@3: expected ErrDeleted, got %v", err)
+	}
+}
+
+func TestSnapshotScanInvisibleBelow(t *testing.T) {
+	m := newMemtable()
+	m.Put(key(1), []byte("v1"), 5)
+
+	// Snapshot at seq=4: the only version has seq=5 > 4, so key is invisible.
+	_, err := m.Get(key(1), 4)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get@4: expected ErrNotFound, got %v", err)
 	}
 }

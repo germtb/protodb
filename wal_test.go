@@ -38,11 +38,11 @@ func TestWALAppendAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, _ := table.Get(walKey(1))
+	got, _ := table.Get(walKey(1), VisibleAll)
 	if string(got) != "hello" {
 		t.Errorf("Get(1): got %q, want %q", got, "hello")
 	}
-	got, _ = table.Get(walKey(2))
+	got, _ = table.Get(walKey(2), VisibleAll)
 	if string(got) != "world" {
 		t.Errorf("Get(2): got %q, want %q", got, "world")
 	}
@@ -61,7 +61,7 @@ func TestWALReplayTombstone(t *testing.T) {
 	wal2, _ := newWAL(walPath)
 	wal2.replay(table) // ignore
 
-	_, err := table.Get(walKey(1))
+	_, err := table.Get(walKey(1), VisibleAll)
 	if err != ErrDeleted {
 		t.Fatalf("expected ErrDeleted, got %v", err)
 	}
@@ -79,7 +79,7 @@ func TestWALReplayEmptyValue(t *testing.T) {
 	wal2, _ := newWAL(walPath)
 	wal2.replay(table) // ignore
 
-	got, err := table.Get(walKey(1))
+	got, err := table.Get(walKey(1), VisibleAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestWALReplayOverwrite(t *testing.T) {
 	wal2, _ := newWAL(walPath)
 	wal2.replay(table) // ignore
 
-	got, _ := table.Get(walKey(1))
+	got, _ := table.Get(walKey(1), VisibleAll)
 	if string(got) != "third" {
 		t.Errorf("got %q, want %q", got, "third")
 	}
@@ -196,7 +196,7 @@ func TestWALReplayTruncatedPayload(t *testing.T) {
 	wal2.replay(table) // ignore
 
 	// First entry should survive
-	got, _ := table.Get(walKey(1))
+	got, _ := table.Get(walKey(1), VisibleAll)
 	if string(got) != "good" {
 		t.Errorf("got %q, want %q", got, "good")
 	}
@@ -225,16 +225,16 @@ func TestWALReplayBadChecksum(t *testing.T) {
 	wal2, _ := newWAL(walPath)
 	wal2.replay(table) // ignore
 
-	got, _ := table.Get(walKey(1))
+	got, _ := table.Get(walKey(1), VisibleAll)
 	if string(got) != "good" {
 		t.Errorf("got %q, want %q", got, "good")
 	}
 	// Entries 2 and 3 should be lost
-	_, err := table.Get(walKey(2))
+	_, err := table.Get(walKey(2), VisibleAll)
 	if err != ErrNotFound {
 		t.Errorf("expected ErrNotFound for key 2, got %v", err)
 	}
-	_, err = table.Get(walKey(3))
+	_, err = table.Get(walKey(3), VisibleAll)
 	if err != ErrNotFound {
 		t.Errorf("expected ErrNotFound for key 3, got %v", err)
 	}
@@ -258,7 +258,7 @@ func TestWALReplayFrameLenZero(t *testing.T) {
 	wal2, _ := newWAL(walPath)
 	wal2.replay(table) // ignore
 
-	got, _ := table.Get(walKey(1))
+	got, _ := table.Get(walKey(1), VisibleAll)
 	if string(got) != "good" {
 		t.Errorf("got %q, want %q", got, "good")
 	}
@@ -299,7 +299,7 @@ func TestWALReplayIgnoresTrailingGarbage(t *testing.T) {
 	wal2, _ := newWAL(walPath)
 	wal2.replay(table) // ignore
 
-	got, _ := table.Get(walKey(1))
+	got, _ := table.Get(walKey(1), VisibleAll)
 	if string(got) != "good" {
 		t.Errorf("expected 'good', got %q", got)
 	}
@@ -346,11 +346,11 @@ func TestWALClearThenAppend(t *testing.T) {
 	wal2, _ := newWAL(walPath)
 	wal2.replay(table) // ignore
 
-	_, err := table.Get(walKey(1))
+	_, err := table.Get(walKey(1), VisibleAll)
 	if err != ErrNotFound {
 		t.Errorf("key 1 should not exist after Clear, got %v", err)
 	}
-	got, _ := table.Get(walKey(2))
+	got, _ := table.Get(walKey(2), VisibleAll)
 	if string(got) != "after" {
 		t.Errorf("got %q, want %q", got, "after")
 	}
@@ -373,7 +373,7 @@ func TestWALLargeValue(t *testing.T) {
 	wal2, _ := newWAL(walPath)
 	wal2.replay(table) // ignore
 
-	got, _ := table.Get(walKey(1))
+	got, _ := table.Get(walKey(1), VisibleAll)
 	if len(got) != len(big) {
 		t.Fatalf("got len %d, want %d", len(got), len(big))
 	}
@@ -418,7 +418,7 @@ func TestWALOnlyTombstones(t *testing.T) {
 	wal2.replay(table) // ignore
 
 	for _, k := range []uint64{1, 2, 3} {
-		_, err := table.Get(walKey(k))
+		_, err := table.Get(walKey(k), VisibleAll)
 		if err != ErrDeleted {
 			t.Errorf("Get(%d): expected ErrDeleted, got %v", k, err)
 		}

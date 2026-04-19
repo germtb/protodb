@@ -9,7 +9,13 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
+
+type sstSlice []*sst
+
+func (e *Engine) L0SSTs() []*sst { return []*sst(*e.l0ssts.Load()) }
+func (e *Engine) L1SSTs() []*sst { return []*sst(*e.l1ssts.Load()) }
 
 type Policy struct {
 	SoftCompactionThreshold int
@@ -18,17 +24,28 @@ type Policy struct {
 	Sync                    bool
 }
 
+type commitNode struct {
+	tx   *Transaction
+	next atomic.Pointer[commitNode]
+}
+
 type Engine struct {
 	flushMutex      sync.RWMutex
 	compactionMutex sync.RWMutex
-	memtable        *memtable
-	path            string
-	fileTable       *FileTable
-	wal             *WAL
-	manifest        *Manifest
-	l0ssts          []*sst
-	l1ssts          []*sst
-	policy          *Policy
+	// seqnum tracks the "epoch" in the memtatable entries. It is used to allow
+	// lock-free scans while other operations are happening.
+	seqnum      atomic.Uint32
+	memtable    atomic.Pointer[memtable]
+	path        string
+	fileTable   *FileTable
+	wal         *WAL
+	manifest    *Manifest
+	l0ssts      atomic.Pointer[sstSlice]
+	l1ssts      atomic.Pointer[sstSlice]
+	policy      *Policy
+	commitHead  atomic.Pointer[commitNode]
+	commitTail  atomic.Pointer[commitNode]
+	commitMutex sync.Mutex
 
 	// Counters (updated under flushMutex / compactionMutex respectively).
 	flushCount      uint64
@@ -82,20 +99,29 @@ func Open(path string) (*Engine, error) {
 		return nil, err
 	}
 
+	sentinel := &commitNode{}
+
 	e := &Engine{
-		memtable:  memtable,
 		path:      path,
 		fileTable: newFileTable(128),
 		wal:       wal,
 		manifest:  manifest,
-		l0ssts:    l0ssts,
-		l1ssts:    l1ssts,
 		policy: &Policy{
 			SoftCompactionThreshold: 4,                // 4 L0 ssts
 			HardCompactionThreshold: 16,               // 16 L0 ssts
 			FlushThreshold:          1024 * 1024 * 64, // 64Mb
 		},
 	}
+
+	e.commitHead.Store(sentinel)
+	e.commitTail.Store(sentinel)
+	e.seqnum.Store(0)
+
+	e.memtable.Store(memtable)
+	l0 := sstSlice(l0ssts)
+	l1 := sstSlice(l1ssts)
+	e.l0ssts.Store(&l0)
+	e.l1ssts.Store(&l1)
 
 	// Sweep any SST files orphaned by a crash between compaction's manifest
 	// sync and its inline os.Remove calls. Cheap — runs once per Open.
@@ -129,21 +155,21 @@ type EngineStats struct {
 
 // Stats returns a snapshot of counters and level sizes.
 func (e *Engine) Stats() EngineStats {
-	e.flushMutex.RLock()
-	defer e.flushMutex.RUnlock()
+	l0ssts := *e.l0ssts.Load()
+	l1ssts := *e.l1ssts.Load()
 	var l0Bytes, l1Bytes int64
-	for _, s := range e.l0ssts {
+	for _, s := range l0ssts {
 		l0Bytes += s.fileSize
 	}
-	for _, s := range e.l1ssts {
+	for _, s := range l1ssts {
 		l1Bytes += s.fileSize
 	}
 	return EngineStats{
 		FlushCount:      e.flushCount,
 		CompactionCount: e.compactionCount,
-		L0SSTs:          len(e.l0ssts),
+		L0SSTs:          len(l0ssts),
 		L0Bytes:         l0Bytes,
-		L1SSTs:          len(e.l1ssts),
+		L1SSTs:          len(l1ssts),
 		L1Bytes:         l1Bytes,
 	}
 }
@@ -190,8 +216,6 @@ func (e *Engine) GetInSST(s *sst, key Key) ([]byte, error) {
 }
 
 func (e *Engine) Get(key Key) ([]byte, error) {
-	e.flushMutex.RLock()
-	defer e.flushMutex.RUnlock()
 	return e.getLocked(key)
 }
 
@@ -206,9 +230,6 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 	if n == 0 {
 		return nil, nil
 	}
-
-	e.flushMutex.RLock()
-	defer e.flushMutex.RUnlock()
 
 	// Build a permutation that sorts the keys without copying them.
 	// indices[i] is the original index of the i-th sorted key.
@@ -230,9 +251,14 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 	sortedDst := make([][]byte, n)
 	resolved := make([]bool, n)
 
+	seqnum := e.seqnum.Load()
+	memtable := e.memtable.Load()
+	l0ssts := *e.l0ssts.Load()
+	l1ssts := *e.l1ssts.Load()
+
 	// 1. Memtable (highest precedence)
 	for i := range n {
-		value, err := e.memtable.Get(sortedKeys[i])
+		value, err := memtable.Get(sortedKeys[i], seqnum)
 		if err == nil {
 			sortedDst[i] = value
 			resolved[i] = true
@@ -243,8 +269,8 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 		}
 	}
 
-	// 2. L0 SSTs (newest first)
-	for _, s := range e.l0ssts {
+	// 2. L0 SSTs (newest first — captured above)
+	for _, s := range l0ssts {
 		handle, err := e.fileTable.getOrOpen(s.path)
 		if err != nil {
 			return nil, err
@@ -267,7 +293,8 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 		}
 	}
 
-	// 3. L1 SSTs (sorted, non-overlapping). Bucket remaining keys by SST.
+	// 3. L1 SSTs (sorted, non-overlapping; captured above). Bucket remaining
+	// keys by SST.
 	startIdx := 0
 	for keyIdx := 0; keyIdx < n; {
 		if resolved[keyIdx] {
@@ -278,7 +305,7 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 		k := sortedKeys[keyIdx]
 
 		// Binary search [startIdx:] for the SST containing k
-		ssts := e.l1ssts[startIdx:]
+		ssts := l1ssts[startIdx:]
 		offset := sort.Search(len(ssts), func(i int) bool {
 			return bytes.Compare(ssts[i].firstKey, k) > 0
 		}) - 1
@@ -291,8 +318,8 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 
 		// Determine how many subsequent keys belong to this SST.
 		var nextFirstKey Key
-		if sstIdx+1 < len(e.l1ssts) {
-			nextFirstKey = e.l1ssts[sstIdx+1].firstKey
+		if sstIdx+1 < len(l1ssts) {
+			nextFirstKey = l1ssts[sstIdx+1].firstKey
 		}
 
 		batchEnd := keyIdx + 1
@@ -303,7 +330,7 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 			batchEnd++
 		}
 
-		s := e.l1ssts[sstIdx]
+		s := l1ssts[sstIdx]
 		handle, err := e.fileTable.getOrOpen(s.path)
 		if err != nil {
 			return nil, err
@@ -340,7 +367,8 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 
 // getLocked performs a Get without acquiring the lock. Caller must hold flushMutex.
 func (e *Engine) getLocked(key Key) ([]byte, error) {
-	value, err := e.memtable.Get(key)
+	seqnum := e.seqnum.Load()
+	value, err := e.memtable.Load().Get(key, seqnum)
 
 	if errors.Is(err, ErrNotFound) {
 		// maybe another sst has it, continue
@@ -352,7 +380,8 @@ func (e *Engine) getLocked(key Key) ([]byte, error) {
 		return value, nil
 	}
 
-	for _, s := range e.l0ssts {
+	l0ssts := *e.l0ssts.Load()
+	for _, s := range l0ssts {
 		value, err := e.GetInSST(s, key)
 
 		if errors.Is(err, ErrNotFound) {
@@ -367,15 +396,16 @@ func (e *Engine) getLocked(key Key) ([]byte, error) {
 	}
 
 	// Binary search on L1 SSTs
-	index := sort.Search(len(e.l1ssts), func(i int) bool {
-		return bytes.Compare(e.l1ssts[i].firstKey, key) > 0
+	l1ssts := *e.l1ssts.Load()
+	index := sort.Search(len(l1ssts), func(i int) bool {
+		return bytes.Compare(l1ssts[i].firstKey, key) > 0
 	}) - 1
 
-	if index < 0 || index >= len(e.l1ssts) {
+	if index < 0 || index >= len(l1ssts) {
 		return nil, nil
 	}
 
-	value, err = e.GetInSST(e.l1ssts[index], key)
+	value, err = e.GetInSST(l1ssts[index], key)
 
 	if errors.Is(err, ErrNotFound) {
 		return nil, nil
@@ -463,23 +493,32 @@ func (it *mergeIterator) Close() error {
 }
 
 func (e *Engine) Scan(lo, hi Key) Iterator {
-	// Clone mutates COW flags, so it needs an exclusive lock. It's O(1).
-	e.flushMutex.Lock()
-	memtable := e.memtable.Clone()
-	l0ssts := make([]*sst, len(e.l0ssts))
-	l1ssts := make([]*sst, len(e.l1ssts))
-	copy(l0ssts, e.l0ssts)
-	copy(l1ssts, e.l1ssts)
-	e.flushMutex.Unlock()
+	seqnum := e.seqnum.Load()
+	activeMemtable := e.memtable.Load()
+	l0ssts := *e.l0ssts.Load()
+	l1ssts := *e.l1ssts.Load()
 
-	return skipTombstones(e.scan(lo, hi, memtable, l0ssts, l1ssts))
+	var sources []Iterator
+
+	if activeMemtable != nil && activeMemtable.Len() > 0 {
+		sources = append(sources, activeMemtable.Scan(lo, hi, seqnum))
+	}
+
+	scanIter := e.scan(lo, hi, nil, l0ssts, l1ssts)
+	sources = append(sources, scanIter)
+
+	if len(sources) == 1 {
+		return skipTombstones(sources[0])
+	}
+
+	return skipTombstones(newMergeIterator(sources))
 }
 
 func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts []*sst) Iterator {
 	var sources []Iterator
 
 	if memtable != nil && memtable.Len() > 0 {
-		sources = []Iterator{memtable.Scan(lo, hi)}
+		sources = []Iterator{memtable.Scan(lo, hi, VisibleAll)}
 	}
 
 	for _, s := range l0ssts {
@@ -513,17 +552,20 @@ func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts 
 	return newMergeIterator(sources)
 }
 
-func (e *Engine) maybeFlushLocked() error {
-	if e.memtable.ByteSize() <= uint64(e.policy.FlushThreshold) {
+func (e *Engine) maybeFlush() error {
+	e.flushMutex.Lock()
+	defer e.flushMutex.Unlock()
+	if e.memtable.Load().ByteSize() <= uint64(e.policy.FlushThreshold) {
 		return nil
 	}
-	if err := e.flushLocked(); err != nil {
+	err := e.flushLocked()
+	if err != nil {
 		return err
 	}
 	// Auto-flush triggers a background compaction. Manual Flush() does not —
 	// tests that inspect L0/L1 state immediately after Flush() rely on it
 	// being a synchronous, side-effect-free checkpoint.
-	if len(e.l0ssts) > e.policy.SoftCompactionThreshold {
+	if len(*e.l0ssts.Load()) > e.policy.SoftCompactionThreshold {
 		if e.compactionMutex.TryLock() {
 			go func() {
 				defer e.compactionMutex.Unlock()
@@ -535,13 +577,25 @@ func (e *Engine) maybeFlushLocked() error {
 }
 
 func (e *Engine) Flush() error {
+	e.commitMutex.Lock()
 	e.flushMutex.Lock()
-	defer e.flushMutex.Unlock()
-	return e.flushLocked()
+	err := e.flushLocked()
+	e.flushMutex.Unlock()
+	e.commitMutex.Unlock()
+
+	// It is possible that flush stopped a commit (since they use TryLock on
+	// the commitMutex) so we kick the commit loop just in case.
+	_ = e.commitLoop(0)
+
+	return err
 }
 
 func (e *Engine) flushLocked() error {
-	new_ssts, err := WriteSST(e.ObjectsPath(), e.memtable.Entries(), true)
+	// Capture the seqnum boundary
+	flushUpTo := e.seqnum.Load()
+	memtable := e.memtable.Load()
+
+	new_ssts, err := WriteSST(e.ObjectsPath(), memtable.Scan(nil, nil, flushUpTo), true)
 	if err != nil {
 		return err
 	}
@@ -568,8 +622,12 @@ func (e *Engine) flushLocked() error {
 		return err
 	}
 
-	e.l0ssts = append(new_ssts, e.l0ssts...)
-	e.memtable = newMemtable()
+	// Update L0
+	newL0 := sstSlice(append(new_ssts, *e.l0ssts.Load()...))
+	e.l0ssts.Store(&newL0)
+	// Now we can update L1
+	e.memtable.Store(newMemtable())
+
 	e.wal.Clear()
 	e.flushCount++
 
@@ -583,12 +641,8 @@ func (e *Engine) Compact() error {
 }
 
 func (e *Engine) compactLocked() error {
-	e.flushMutex.Lock()
-	l0ssts := make([]*sst, len(e.l0ssts))
-	l1ssts := make([]*sst, len(e.l1ssts))
-	copy(l0ssts, e.l0ssts)
-	copy(l1ssts, e.l1ssts)
-	e.flushMutex.Unlock()
+	l0ssts := slices.Clone([]*sst(*e.l0ssts.Load()))
+	l1ssts := slices.Clone([]*sst(*e.l1ssts.Load()))
 
 	originalL1ssts := slices.Clone(l1ssts)
 
@@ -658,14 +712,17 @@ func (e *Engine) compactLocked() error {
 		return err
 	}
 
-	e.l1ssts = new_ssts
+	newL1 := sstSlice(new_ssts)
+	e.l1ssts.Store(&newL1)
 
-	newL0 := slices.Clone(e.manifest.L0Hashes())
-	newL0 = newL0[:len(newL0)-len(l0ssts)]
-	if err := e.manifest.Update(levelL0, newL0); err != nil {
+	newL0Hashes := slices.Clone(e.manifest.L0Hashes())
+	newL0Hashes = newL0Hashes[:len(newL0Hashes)-len(l0ssts)]
+	if err := e.manifest.Update(levelL0, newL0Hashes); err != nil {
 		return err
 	}
-	e.l0ssts = e.l0ssts[:len(e.l0ssts)-len(l0ssts)]
+	currentL0 := *e.l0ssts.Load()
+	trimmedL0 := sstSlice(currentL0[:len(currentL0)-len(l0ssts)])
+	e.l0ssts.Store(&trimmedL0)
 
 	if err := e.manifest.Sync(); err != nil {
 		return err
@@ -763,23 +820,24 @@ type Transaction struct {
 	engine   *Engine
 	entries  []txEntry
 	byteSize int
+	done     chan error
 }
 
 func (e *Engine) Transaction() Transaction {
 	// Write stall: if L0 is too tall, force a synchronous compaction before
 	// accepting the write. compactionMutex serializes so at most one writer
 	// actually runs the compaction; others wait here and re-check after.
-	if len(e.l0ssts) >= e.policy.HardCompactionThreshold {
+	if len(*e.l0ssts.Load()) >= e.policy.HardCompactionThreshold {
 		e.compactionMutex.Lock()
-		if len(e.l0ssts) >= e.policy.HardCompactionThreshold {
+		if len(*e.l0ssts.Load()) >= e.policy.HardCompactionThreshold {
 			_ = e.compactLocked()
 		}
 		e.compactionMutex.Unlock()
 	}
 
-	e.flushMutex.Lock()
 	return Transaction{
 		engine: e,
+		done:   make(chan error, 1),
 	}
 }
 
@@ -807,39 +865,108 @@ func (tx *Transaction) Get(key Key) ([]byte, error) {
 }
 
 func (tx *Transaction) Commit() error {
-	defer tx.engine.flushMutex.Unlock()
+	return tx.engine.queueTransaction(tx)
+}
 
-	batch := tx.engine.wal.Batch()
-	for _, entry := range tx.entries {
-		if entry.value == nil {
-			batch.Delete(entry.key)
-		} else {
-			batch.Put(entry.key, entry.value)
+func (tx *Transaction) Cancel() {
+}
+
+func (e *Engine) queueTransaction(tx *Transaction) error {
+	node := &commitNode{tx: tx}
+
+	for {
+		tail := e.commitTail.Load()
+		if tail.next.CompareAndSwap(nil, node) {
+			e.commitTail.CompareAndSwap(tail, node)
+			break
 		}
-	}
-	err := batch.Commit()
-	if err != nil {
-		return err
+		// tail.next is not nil — another enqueuer already linked here.
+		// Reload commitTail on next iteration to get the latest.
 	}
 
-	if tx.engine.policy.Sync {
-		if err := tx.engine.wal.sync(); err != nil {
+	e.commitLoop(0)
+
+	return <-tx.done
+}
+
+const MAX_COMMIT_LOOP_STACK = 1000
+
+func (e *Engine) commitLoop(counter int) error {
+	if counter > MAX_COMMIT_LOOP_STACK {
+		return nil
+	}
+	if !e.commitMutex.TryLock() {
+		return nil
+	}
+
+	node := e.commitHead.Load().next.Load()
+	tail := e.commitTail.Load()
+
+	shouldSync := false
+
+	for node != nil {
+		batch := node.tx.engine.wal.Batch()
+		for _, entry := range node.tx.entries {
+			if entry.value == nil {
+				batch.Delete(entry.key)
+			} else {
+				batch.Put(entry.key, entry.value)
+			}
+		}
+		err := batch.Commit()
+		if err != nil {
+			node.tx.done <- err
+		} else {
+			node.tx.done <- nil
+			shouldSync = true
+			memtable := e.memtable.Load()
+			startSeq := e.seqnum.Load() + 1
+			localSeq := startSeq
+			for _, entry := range node.tx.entries {
+				if entry.value == nil {
+					memtable.Delete(entry.key, localSeq)
+				} else {
+					memtable.Put(entry.key, entry.value, localSeq)
+				}
+				localSeq++
+			}
+			// Publish the tx atomically: Store only after every entry is in
+			// the memtable, so readers never see a half-applied transaction.
+			if localSeq > startSeq {
+				e.seqnum.Store(localSeq - 1)
+			}
+		}
+
+		e.commitHead.Store(node)
+
+		if node == tail {
+			// We already reached the tail, let's stop
+			break
+		}
+
+		node = node.next.Load()
+	}
+
+	if shouldSync && e.policy.Sync {
+		if err := e.wal.sync(); err != nil {
+			e.commitMutex.Unlock()
 			return err
 		}
 	}
 
-	// WAL is durable — only now is it safe to make the writes visible.
-	for _, entry := range tx.entries {
-		if entry.value == nil {
-			tx.engine.memtable.Delete(entry.key)
-		} else {
-			tx.engine.memtable.Put(entry.key, entry.value)
+	if e.memtable.Load().ByteSize() > uint64(e.policy.FlushThreshold) {
+		if err := e.maybeFlush(); err != nil {
+			e.commitMutex.Unlock()
+			return err
 		}
 	}
 
-	return tx.engine.maybeFlushLocked()
-}
+	e.commitMutex.Unlock()
 
-func (tx *Transaction) Cancel() {
-	tx.engine.flushMutex.Unlock()
+	if node := e.commitHead.Load().next.Load(); node != nil {
+		// New work arrived!
+		return e.commitLoop(counter + 1)
+	}
+
+	return nil
 }
