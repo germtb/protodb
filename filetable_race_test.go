@@ -20,7 +20,7 @@ func TestFileTablePinnedHandleSurvivesEviction(t *testing.T) {
 		}
 	}
 
-	ft := newFileTable(2)
+	ft := newFileTable(DefaultFS, 2)
 
 	// Caller gets a handle — refs = 1, in LRU.
 	h0, err := ft.getOrOpen(filepath.Join(dir, "f0"))

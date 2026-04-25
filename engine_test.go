@@ -2345,12 +2345,12 @@ func TestSSTScanAfterFileDeleted(t *testing.T) {
 		{key(2), []byte("b")},
 	}
 
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := ReadSST(dir, ssts[0].hash, nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2394,12 +2394,12 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 		{key(3), []byte("cccccccccc")},
 	}
 
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := ReadSST(dir, ssts[0].hash, nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2425,12 +2425,12 @@ func TestSSTGetTruncatedFile(t *testing.T) {
 		{key(1), []byte("hello world")},
 	}
 
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := ReadSST(dir, ssts[0].hash, nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2453,7 +2453,7 @@ func TestReadSSTCorruptedFooterCount(t *testing.T) {
 		{key(1), []byte("x")},
 	}
 
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2488,7 +2488,7 @@ func TestReadSSTCorruptedFooterCount(t *testing.T) {
 		}
 	}()
 
-	_, err = ReadSST(dir, hash, nil)
+	_, err = ReadSST(DefaultFS, dir, LevelMetadata{hash: hash}, nil)
 	if err == nil {
 		t.Fatalf("expected error for corrupted footer, got nil")
 	}
@@ -2549,7 +2549,7 @@ func TestWriteSSTFailsOnBadDir(t *testing.T) {
 		{key(1), []byte("a")},
 	})
 
-	_, err := WriteSST(blocker, entries, true)
+	_, err := WriteSST(DefaultFS, blocker, entries, true)
 	if err == nil {
 		t.Fatal("expected WriteSST to fail when dir is actually a file")
 	}
@@ -4642,13 +4642,17 @@ func TestCorruptedManifestInvalidHash(t *testing.T) {
 	engine.Close()
 
 	// Write a valid L1 frame that references a hash with no SST file.
+	// Frame layout: crc(4) + level(1) + entries_len(4) + {hash(32) +
+	// first_len(4) + first + last_len(4) + last} × n. Here n=1 and both
+	// key ranges are empty, so the per-entry payload is 32 + 4 + 0 + 4 + 0.
 	manifestPath := filepath.Join(dir, "protodb", "manifest")
-	record := make([]byte, 4+1+4+32) // crc + level + len + hash
-	record[4] = 1                    // level L1
+	record := make([]byte, 4+1+4+32+4+4)
+	record[4] = 1 // level L1
 	binary.BigEndian.PutUint32(record[5:9], 1)
 	for i := 0; i < 32; i++ {
 		record[9+i] = 0xde
 	}
+	// first_len = 0 at [41:45], last_len = 0 at [45:49] — already zeroed.
 	binary.BigEndian.PutUint32(record[0:4], crc32.ChecksumIEEE(record[4:]))
 	if err := os.WriteFile(manifestPath, record, 0644); err != nil {
 		t.Fatal(err)
@@ -5329,9 +5333,11 @@ func TestCorruptedL0Manifest(t *testing.T) {
 	engine.Close()
 
 	// Write a valid L0 frame that references a hash with no SST file.
+	// Frame: crc(4) + level(1) + entries_len(4) + {hash(32) + first_len(4)
+	// + first + last_len(4) + last} × 1, with both key ranges empty.
 	manifestPath := filepath.Join(dir, "protodb", "manifest")
-	record := make([]byte, 4+1+4+32) // crc + level + len + one hash
-	record[4] = 0                    // level L0
+	record := make([]byte, 4+1+4+32+4+4)
+	record[4] = 0 // level L0
 	binary.BigEndian.PutUint32(record[5:9], 1)
 	for i := 0; i < 32; i++ {
 		record[9+i] = 0xaa
@@ -5678,8 +5684,8 @@ func TestDoubleCompactVerifiesL0EmptyAndOverwrite(t *testing.T) {
 	if len(engine.L0SSTs()) != 0 {
 		t.Errorf("L0 should have 0 SSTs after compact, got %d", len(engine.L0SSTs()))
 	}
-	if len(engine.manifest.L0Hashes()) != 0 {
-		t.Errorf("L0 manifest should have 0 hashes after compact, got %d", len(engine.manifest.L0Hashes()))
+	if len(engine.manifest.L0()) != 0 {
+		t.Errorf("L0 manifest should have 0 hashes after compact, got %d", len(engine.manifest.L0()))
 	}
 
 	// Second batch: flush and compact again.
@@ -5699,8 +5705,8 @@ func TestDoubleCompactVerifiesL0EmptyAndOverwrite(t *testing.T) {
 	if len(engine.L0SSTs()) != 0 {
 		t.Errorf("L0 should have 0 SSTs after second compact, got %d", len(engine.L0SSTs()))
 	}
-	if len(engine.manifest.L0Hashes()) != 0 {
-		t.Errorf("L0 manifest should have 0 hashes after second compact, got %d", len(engine.manifest.L0Hashes()))
+	if len(engine.manifest.L0()) != 0 {
+		t.Errorf("L0 manifest should have 0 hashes after second compact, got %d", len(engine.manifest.L0()))
 	}
 
 	// All data should be correct in L1.
@@ -5876,11 +5882,11 @@ func TestAggressiveAutoCompaction(t *testing.T) {
 func countOrphans(t *testing.T, engine *Engine) int {
 	t.Helper()
 	referenced := make(map[string]struct{})
-	for _, h := range engine.manifest.L0Hashes() {
-		referenced[h] = struct{}{}
+	for _, m := range engine.manifest.L0() {
+		referenced[m.hash] = struct{}{}
 	}
-	for _, h := range engine.manifest.L1Hashes() {
-		referenced[h] = struct{}{}
+	for _, m := range engine.manifest.L1() {
+		referenced[m.hash] = struct{}{}
 	}
 	entries, err := os.ReadDir(engine.ObjectsPath())
 	if err != nil {

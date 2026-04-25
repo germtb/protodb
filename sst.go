@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"os"
 	"path/filepath"
 	"sync"
 
@@ -148,7 +147,7 @@ func readBlockIndex(reader *bytes.Reader) (sstBlockIndex, error) {
 // writeTombstones controls whether entries with value == nil are serialized.
 // Flushes must write tombstones so deletions shadow older values at lower
 // levels; bottom-level compactions pass false to reclaim space.
-func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, error) {
+func WriteSST(fs FS, path string, entries Iterator, writeTombstones bool) ([]*sst, error) {
 	var ssts []*sst
 	var buffer bytes.Buffer
 	buffer.Grow(SSTSize)
@@ -256,13 +255,18 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 		// Write to temp file, rename. No per-file fsync — callers batch a single
 		// syncDir(path) + manifest fsync after all SSTs in the flush/compaction
 		// are written.
-		tempfile, err := os.CreateTemp(path, "-temp-")
+		tempfile, tempPath, err := CreateTempFile(fs, path, "-temp-")
 		if err != nil {
 			return err
 		}
+		renamed := false
 		defer func() {
-			tempfile.Close()
-			os.Remove(tempfile.Name())
+			if tempfile != nil {
+				_ = tempfile.Close()
+			}
+			if !renamed {
+				_ = fs.Remove(tempPath)
+			}
 		}()
 
 		_, err = tempfile.Write(buffer.Bytes())
@@ -270,14 +274,16 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 			return err
 		}
 		if err := tempfile.Close(); err != nil {
+			tempfile = nil
 			return err
 		}
+		tempfile = nil
 
 		finalPath := filepath.Join(path, hash)
-		err = os.Rename(tempfile.Name(), finalPath)
-		if err != nil {
+		if err := fs.Rename(tempPath, finalPath); err != nil {
 			return err
 		}
+		renamed = true
 
 		ssts = append(ssts, &sst{
 			cache:    newLRU[uint64, sstBlock](128, nil),
@@ -362,21 +368,20 @@ func WriteSST(path string, entries Iterator, writeTombstones bool) ([]*sst, erro
 	return ssts, nil
 }
 
-func ReadSST(path string, hash string, options *ReaderOptions) (*sst, error) {
-	path = filepath.Join(path, hash)
-	file, err := os.Open(path)
+func ReadSST(fs FS, path string, meta LevelMetadata, options *ReaderOptions) (*sst, error) {
+	path = filepath.Join(path, meta.hash)
+	file, err := fs.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	info, err := file.Stat()
+	info, err := fs.Stat(path)
 	if err != nil {
 		return nil, err
 	}
 	fileSize := info.Size()
 
-	// Read the footer first
 	if fileSize < sstFooterSize {
 		return nil, fmt.Errorf("%w: file too small (%d bytes)", ErrCorrupted, fileSize)
 	}
@@ -395,7 +400,6 @@ func ReadSST(path string, hash string, options *ReaderOptions) (*sst, error) {
 		return nil, fmt.Errorf("%w: got %d, want %d", ErrUnsupportedVersion, footer.Version, Version)
 	}
 
-	// Read the block index
 	blockIndexEnd := fileSize - sstFooterSize
 	blockIndexStart := blockIndexEnd - int64(footer.BlockIndexSize)
 
@@ -418,59 +422,16 @@ func ReadSST(path string, hash string, options *ReaderOptions) (*sst, error) {
 		blocks = append(blocks, blockIndex)
 	}
 
-	var firstKey Key
-	if len(blocks) > 0 {
-		firstKey = blocks[0].FirstKey
-	}
-
-	s := &sst{
+	return &sst{
 		cache:    newLRU[uint64, sstBlock](128, nil),
 		blocks:   blocks,
 		footer:   footer,
-		hash:     hash,
+		hash:     meta.hash,
 		path:     path,
 		fileSize: fileSize,
-		firstKey: firstKey,
-	}
-
-	// Populate the lastKey by readin the last block
-	if len(blocks) > 0 {
-		last := blocks[len(blocks)-1]
-		compressed := make([]byte, last.Length)
-		_, err := file.ReadAt(compressed, int64(last.Offset))
-
-		if err != nil {
-			return s, err
-		}
-
-		data, err := snappy.Decode(nil, compressed)
-
-		if err != nil {
-			return s, err
-		}
-		if int64(len(data)) < blockFooterSize {
-			return s, ErrCorrupted
-		}
-
-		stored := binary.BigEndian.Uint32(data[len(data)-4:])
-
-		if crc32.ChecksumIEEE(data[:len(data)-4]) != stored {
-			return s, ErrCorrupted
-		}
-
-		end := int64(len(data)) - blockFooterSize
-		var pos int64
-		for pos < end {
-			key, _, entrySize, err := readEntry(data, pos)
-			if err != nil {
-				break
-			}
-			s.lastKey = key
-			pos += entrySize
-		}
-	}
-
-	return s, nil
+		firstKey: meta.first,
+		lastKey:  meta.last,
+	}, nil
 }
 
 func (s *sst) GetBlock(blockIndex uint64, reader reader) (*sstBlock, error) {

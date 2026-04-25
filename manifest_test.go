@@ -2,7 +2,7 @@ package protodb
 
 import (
 	"path/filepath"
-	"slices"
+	"reflect"
 	"testing"
 )
 
@@ -10,15 +10,19 @@ const hashA = "aabbccdd000000000000000000000000000000000000000000000000000000aa"
 const hashB = "11223344000000000000000000000000000000000000000000000000000000bb"
 const hashC = "deadbeef000000000000000000000000000000000000000000000000000000cc"
 
+func metaA() LevelMetadata { return LevelMetadata{hash: hashA, first: Key("aa"), last: Key("az")} }
+func metaB() LevelMetadata { return LevelMetadata{hash: hashB, first: Key("ba"), last: Key("bz")} }
+func metaC() LevelMetadata { return LevelMetadata{hash: hashC, first: Key("ca"), last: Key("cz")} }
+
 func TestManifestRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "manifest")
 
-	m, err := newManifest(path)
+	m, err := newManifest(DefaultFS, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantL0 := []string{hashA, hashB}
-	wantL1 := []string{hashC}
+	wantL0 := []LevelMetadata{metaA(), metaB()}
+	wantL1 := []LevelMetadata{metaC()}
 	if err := m.Update(levelL0, wantL0); err != nil {
 		t.Fatal(err)
 	}
@@ -30,15 +34,15 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	m.handle.Close()
 
-	m2, err := newManifest(path)
+	m2, err := newManifest(DefaultFS, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(m2.L0Hashes(), wantL0) {
-		t.Fatalf("L0: got %v, want %v", m2.L0Hashes(), wantL0)
+	if !reflect.DeepEqual(m2.L0(), wantL0) {
+		t.Fatalf("L0: got %v, want %v", m2.L0(), wantL0)
 	}
-	if !slices.Equal(m2.L1Hashes(), wantL1) {
-		t.Fatalf("L1: got %v, want %v", m2.L1Hashes(), wantL1)
+	if !reflect.DeepEqual(m2.L1(), wantL1) {
+		t.Fatalf("L1: got %v, want %v", m2.L1(), wantL1)
 	}
 }
 
@@ -46,17 +50,17 @@ func TestManifestLastFrameWins(t *testing.T) {
 	// Successive L0 frames should each fully replace the previous L0 state.
 	path := filepath.Join(t.TempDir(), "manifest")
 
-	m, err := newManifest(path)
+	m, err := newManifest(DefaultFS, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Update(levelL0, []string{hashA}); err != nil {
+	if err := m.Update(levelL0, []LevelMetadata{metaA()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Update(levelL0, []string{hashA, hashB}); err != nil {
+	if err := m.Update(levelL0, []LevelMetadata{metaA(), metaB()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Update(levelL0, []string{hashC}); err != nil {
+	if err := m.Update(levelL0, []LevelMetadata{metaC()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Sync(); err != nil {
@@ -64,16 +68,16 @@ func TestManifestLastFrameWins(t *testing.T) {
 	}
 	m.handle.Close()
 
-	m2, err := newManifest(path)
+	m2, err := newManifest(DefaultFS, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{hashC}
-	if !slices.Equal(m2.L0Hashes(), want) {
-		t.Fatalf("reopen should return the last L0 frame: got %v, want %v", m2.L0Hashes(), want)
+	want := []LevelMetadata{metaC()}
+	if !reflect.DeepEqual(m2.L0(), want) {
+		t.Fatalf("reopen should return the last L0 frame: got %v, want %v", m2.L0(), want)
 	}
-	if len(m2.L1Hashes()) != 0 {
-		t.Fatalf("L1 should be empty, got %v", m2.L1Hashes())
+	if len(m2.L1()) != 0 {
+		t.Fatalf("L1 should be empty, got %v", m2.L1())
 	}
 }
 
@@ -81,18 +85,18 @@ func TestManifestIndependentLevels(t *testing.T) {
 	// L0 updates must not affect L1 and vice versa.
 	path := filepath.Join(t.TempDir(), "manifest")
 
-	m, _ := newManifest(path)
-	m.Update(levelL1, []string{hashA})
-	m.Update(levelL0, []string{hashB})
-	m.Update(levelL0, []string{hashC})
+	m, _ := newManifest(DefaultFS, path)
+	m.Update(levelL1, []LevelMetadata{metaA()})
+	m.Update(levelL0, []LevelMetadata{metaB()})
+	m.Update(levelL0, []LevelMetadata{metaC()})
 	m.Sync()
 	m.handle.Close()
 
-	m2, _ := newManifest(path)
-	if !slices.Equal(m2.L0Hashes(), []string{hashC}) {
-		t.Errorf("L0: got %v", m2.L0Hashes())
+	m2, _ := newManifest(DefaultFS, path)
+	if !reflect.DeepEqual(m2.L0(), []LevelMetadata{metaC()}) {
+		t.Errorf("L0: got %v", m2.L0())
 	}
-	if !slices.Equal(m2.L1Hashes(), []string{hashA}) {
-		t.Errorf("L1: got %v", m2.L1Hashes())
+	if !reflect.DeepEqual(m2.L1(), []LevelMetadata{metaA()}) {
+		t.Errorf("L1: got %v", m2.L1())
 	}
 }

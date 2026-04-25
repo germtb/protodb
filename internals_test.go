@@ -141,11 +141,11 @@ func BenchmarkSSTIterate1000(b *testing.B) {
 		pairs[idx].Key = key(uint64(idx))
 		pairs[idx].Value = []byte("value")
 	}
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		b.Fatal(err)
 	}
-	s, err := ReadSST(dir, ssts[0].hash, nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -171,11 +171,11 @@ func BenchmarkSSTGet(b *testing.B) {
 		pairs[idx].Key = key(uint64(idx))
 		pairs[idx].Value = []byte("value")
 	}
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		b.Fatal(err)
 	}
-	s, err := ReadSST(dir, ssts[0].hash, nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -199,11 +199,11 @@ func BenchmarkSSTGetWithKeyAlloc(b *testing.B) {
 		pairs[idx].Key = key(uint64(idx))
 		pairs[idx].Value = []byte("value")
 	}
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		b.Fatal(err)
 	}
-	s, err := ReadSST(dir, ssts[0].hash, nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
 	if err != nil {
 		b.Fatal(err)
 	}

@@ -49,16 +49,18 @@ const DefaultWALFlushBytes int = 32 * 1024 // 32Kb
 const DefaultWALSyncBytes int = 0          // Rely on the OS
 
 type WAL struct {
+	fs             FS
 	path           string
-	handle         *os.File
+	handle         File
 	buf            bytes.Buffer
 	unsyncedBytes  int
 	flushThreshold int
 	syncThreshold  int // fsync threshold; 0 = never auto-sync, rely on OS
 }
 
-func newWAL(path string) (*WAL, error) {
+func newWAL(fs FS, path string) (*WAL, error) {
 	return &WAL{
+		fs:             fs,
 		path:           path,
 		handle:         nil,
 		unsyncedBytes:  0,
@@ -71,7 +73,7 @@ func (wal *WAL) open() error {
 	if wal.handle != nil {
 		return nil
 	}
-	handle, err := os.OpenFile(wal.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	handle, err := wal.fs.OpenAppend(wal.path)
 	if err != nil {
 		return err
 	}
@@ -112,10 +114,8 @@ func (wal *WAL) sync() error {
 	if err != nil {
 		return err
 	}
-
 	wal.unsyncedBytes = 0
 	return nil
-
 }
 
 type WALBatch struct {
@@ -126,6 +126,14 @@ type WALBatch struct {
 
 func (wal *WAL) Batch() WALBatch {
 	return WALBatch{wal: wal}
+}
+
+// Grow pre-allocates batch buffer capacity. Callers that know the
+// approximate serialized payload size (e.g. commitLoop has tx.byteSize)
+// use this to avoid ~log2(N) incremental bytes.Buffer reallocations as
+// frames are appended.
+func (batch *WALBatch) Grow(n int) {
+	batch.buf.Grow(n)
 }
 
 func (batch *WALBatch) Put(key Key, value []byte) {
@@ -142,7 +150,6 @@ func (wal *WAL) maybeFlush() error {
 	if wal.buf.Len() >= wal.flushThreshold {
 		return wal.flush()
 	}
-
 	return nil
 }
 
@@ -150,7 +157,6 @@ func (wal *WAL) maybeSync() error {
 	if wal.syncThreshold > 0 && wal.unsyncedBytes >= wal.syncThreshold {
 		return wal.sync()
 	}
-
 	return nil
 }
 
@@ -162,15 +168,10 @@ func (batch *WALBatch) Commit() error {
 	writeU32(&wal.buf, commitKeyLen)
 	wal.unsyncedBytes += len(data) + 8
 
-	err := wal.maybeFlush()
-	if err != nil {
+	if err := wal.maybeFlush(); err != nil {
 		return err
 	}
-	err = wal.maybeSync()
-	if err != nil {
-		return err
-	}
-	return nil
+	return wal.maybeSync()
 }
 
 func writeFrame(buf *bytes.Buffer, key Key, value []byte) {
@@ -190,18 +191,24 @@ func writeFrame(buf *bytes.Buffer, key Key, value []byte) {
 	binary.BigEndian.PutUint32(data[crcStart:], crc32.ChecksumIEEE(data[crcStart+walChecksumSize:]))
 }
 
+// Clear resets the WAL to empty. Closes the current handle, truncates the
+// file to 0 via FS, and leaves the handle nil — the next Append will lazily
+// reopen via open(). Done this way (instead of File.Truncate) so the File
+// interface stays a subset of Pebble's vfs.File.
+//
+// If the WAL file was never opened (handle still nil), this is a no-op —
+// there's nothing on disk to truncate.
 func (wal *WAL) Clear() error {
 	wal.buf.Reset()
 	wal.unsyncedBytes = 0
 	if wal.handle == nil {
 		return nil
 	}
-	err := wal.handle.Truncate(0)
-	if err != nil {
+	if err := wal.handle.Close(); err != nil {
 		return err
 	}
-	_, err = wal.handle.Seek(0, 0)
-	return err
+	wal.handle = nil
+	return wal.fs.Truncate(wal.path, 0)
 }
 
 func (wal *WAL) Close() error {
@@ -221,15 +228,15 @@ func (wal *WAL) Close() error {
 func (wal *WAL) Drop() error {
 	wal.buf.Reset()
 	wal.unsyncedBytes = 0
-	if wal.handle == nil {
-		return nil
+	if wal.handle != nil {
+		_ = wal.handle.Close()
+		wal.handle = nil
 	}
-	wal.handle.Truncate(0)
-	return wal.handle.Close()
+	return wal.fs.Truncate(wal.path, 0)
 }
 
 func (wal *WAL) replay(table *memtable) (int, error) {
-	data, err := os.ReadFile(wal.path)
+	data, err := wal.fs.ReadFile(wal.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil

@@ -1,7 +1,6 @@
 package protodb
 
 import (
-	"os"
 	"sync"
 )
 
@@ -14,18 +13,19 @@ import (
 // that already hold a handle can keep reading even after eviction.
 type FileTable struct {
 	mu       sync.Mutex
+	fs       FS
 	items    map[string]*FileHandle
 	head     *FileHandle
 	tail     *FileHandle
 	capacity int
 }
 
-// FileHandle is a shared, refcounted handle to a cached *os.File. It
-// implements the `reader` interface. Callers get one via FileTable.getOrOpen
-// and must Close it exactly once. Close is NOT idempotent at this layer —
+// FileHandle is a shared, refcounted handle to a cached File. It implements
+// the `reader` interface. Callers get one via FileTable.getOrOpen and must
+// Close it exactly once. Close is NOT idempotent at this layer —
 // iterator-level wrappers should guard against double-close with a nil check.
 type FileHandle struct {
-	file *os.File
+	file File
 	path string
 	ft   *FileTable
 	refs int // protected by ft.mu
@@ -33,12 +33,13 @@ type FileHandle struct {
 	prev *FileHandle
 }
 
-func newFileTable(capacity int) *FileTable {
+func newFileTable(fs FS, capacity int) *FileTable {
 	head := &FileHandle{}
 	tail := &FileHandle{}
 	head.next = tail
 	tail.prev = head
 	return &FileTable{
+		fs:       fs,
 		items:    make(map[string]*FileHandle, capacity),
 		head:     head,
 		tail:     tail,
@@ -73,7 +74,7 @@ func (ft *FileTable) getOrOpen(path string) (*FileHandle, error) {
 		return handle, nil
 	}
 
-	file, err := os.Open(path)
+	file, err := ft.fs.Open(path)
 	if err != nil {
 		return nil, err
 	}

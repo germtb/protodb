@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math"
 	"math/rand/v2"
+	"sync"
 	"sync/atomic"
 )
 
@@ -20,18 +21,46 @@ type skipnode struct {
 	height int
 }
 
-func newSkipnode(key Key, seqnum uint64, value []byte, height int) *skipnode {
-	return &skipnode{key: key, seqnum: seqnum, value: value, height: height}
+// Arena to reduce alloc pressure. Memtable is dropped on flush, so it is easy to GC
+type nodeArena struct {
+	mu        sync.Mutex
+	chunks    [][]skipnode
+	chunkSize int
+	nextIdx   int
+}
+
+const defaultArenaChunkSize = 256
+
+func newNodeArena(chunkSize int) *nodeArena {
+	return &nodeArena{chunkSize: chunkSize}
+}
+
+func (a *nodeArena) alloc(key Key, seqnum uint64, value []byte, height int) *skipnode {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.chunks) == 0 || a.nextIdx >= a.chunkSize {
+		// Fresh chunks come zeroed from `make`, so next[] is already nil.
+		a.chunks = append(a.chunks, make([]skipnode, a.chunkSize))
+		a.nextIdx = 0
+	}
+	n := &a.chunks[len(a.chunks)-1][a.nextIdx]
+	a.nextIdx++
+	n.key = key
+	n.seqnum = seqnum
+	n.value = value
+	n.height = height
+	return n
 }
 
 type Skiplist struct {
 	head     skipnode
+	arena    *nodeArena
 	length   atomic.Int64
 	byteSize atomic.Int64
 }
 
 func NewSkiplist() *Skiplist {
-	sl := &Skiplist{}
+	sl := &Skiplist{arena: newNodeArena(defaultArenaChunkSize)}
 	sl.head.height = maxHeight
 	return sl
 }
@@ -85,7 +114,7 @@ func (s *Skiplist) findPredecessors(key Key, seqnum uint64) [maxHeight]*skipnode
 func (s *Skiplist) insert(key Key, seqnum uint64, value []byte) {
 	predecessors := s.findPredecessors(key, seqnum)
 	height := randomHeight()
-	newNode := newSkipnode(key, seqnum, value, height)
+	newNode := s.arena.alloc(key, seqnum, value, height)
 
 	for level := 0; level < height; level++ {
 		pred := predecessors[level]

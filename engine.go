@@ -36,6 +36,7 @@ type Engine struct {
 	// lock-free scans while other operations are happening.
 	seqnum      atomic.Uint64
 	memtable    atomic.Pointer[memtable]
+	fs          FS
 	path        string
 	fileTable   *FileTable
 	wal         *WAL
@@ -52,10 +53,22 @@ type Engine struct {
 	compactionCount uint64
 }
 
-func loadSSTs(objectsPath string, hashes []string) ([]*sst, error) {
-	ssts := make([]*sst, 0, len(hashes))
-	for _, h := range hashes {
-		s, err := ReadSST(objectsPath, h, nil)
+type EngineOption func(*engineConfig)
+
+type engineConfig struct {
+	fs FS
+}
+
+// WithFS overrides the filesystem used by the engine. Defaults to DefaultFS
+// (os-backed). Primarily for tests / error injection.
+func WithFS(fs FS) EngineOption {
+	return func(c *engineConfig) { c.fs = fs }
+}
+
+func loadSSTs(fs FS, objectsPath string, metadata []LevelMetadata) ([]*sst, error) {
+	ssts := make([]*sst, 0, len(metadata))
+	for _, m := range metadata {
+		s, err := ReadSST(fs, objectsPath, m, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -64,30 +77,35 @@ func loadSSTs(objectsPath string, hashes []string) ([]*sst, error) {
 	return ssts, nil
 }
 
-func Open(path string) (*Engine, error) {
+func Open(path string, options ...EngineOption) (*Engine, error) {
+	config := engineConfig{fs: DefaultFS}
+	for _, opt := range options {
+		opt(&config)
+	}
+
 	path = filepath.Join(path, "protodb")
 
-	err := os.MkdirAll(filepath.Join(path, "objects"), 0755)
+	err := config.fs.MkdirAll(filepath.Join(path, "objects"), 0755)
 	if err != nil {
 		return nil, err
 	}
 
-	wal, err := newWAL(filepath.Join(path, "wal"))
+	wal, err := newWAL(config.fs, filepath.Join(path, "wal"))
 	if err != nil {
 		return nil, err
 	}
 
-	manifest, err := newManifest(filepath.Join(path, "manifest"))
+	manifest, err := newManifest(config.fs, filepath.Join(path, "manifest"))
 	if err != nil {
 		return nil, err
 	}
 
 	objectsPath := filepath.Join(path, "objects")
-	l0ssts, err := loadSSTs(objectsPath, manifest.L0Hashes())
+	l0ssts, err := loadSSTs(config.fs, objectsPath, manifest.L0())
 	if err != nil {
 		return nil, err
 	}
-	l1ssts, err := loadSSTs(objectsPath, manifest.L1Hashes())
+	l1ssts, err := loadSSTs(config.fs, objectsPath, manifest.L1())
 	if err != nil {
 		return nil, err
 	}
@@ -102,8 +120,9 @@ func Open(path string) (*Engine, error) {
 	sentinel := &commitNode{}
 
 	e := &Engine{
+		fs:        config.fs,
 		path:      path,
-		fileTable: newFileTable(128),
+		fileTable: newFileTable(config.fs, 128),
 		wal:       wal,
 		manifest:  manifest,
 		policy: &Policy{
@@ -608,7 +627,7 @@ func (e *Engine) flushLocked() error {
 	flushUpTo := e.seqnum.Load()
 	memtable := e.memtable.Load()
 
-	new_ssts, err := WriteSST(e.ObjectsPath(), memtable.Scan(nil, nil, flushUpTo), true)
+	new_ssts, err := WriteSST(e.fs, e.ObjectsPath(), memtable.Scan(nil, nil, flushUpTo), true)
 	if err != nil {
 		return err
 	}
@@ -616,18 +635,18 @@ func (e *Engine) flushLocked() error {
 	// Commit SST renames (and, via metadata-after-data ordering, their content)
 	// before the manifest references them.
 	if len(new_ssts) > 0 {
-		err := syncDir(e.ObjectsPath())
+		err := syncDir(e.fs, e.ObjectsPath())
 		if err != nil {
 			return err
 		}
 	}
 
-	newHashes := slices.Clone(e.manifest.L0Hashes())
+	newL0Meta := slices.Clone(e.manifest.L0())
 	for _, s := range new_ssts {
-		newHashes = slices.Insert(newHashes, 0, s.hash)
+		newL0Meta = slices.Insert(newL0Meta, 0, LevelMetadata{hash: s.hash, first: s.firstKey, last: s.lastKey})
 	}
 
-	if err := e.manifest.Update(levelL0, newHashes); err != nil {
+	if err := e.manifest.Update(levelL0, newL0Meta); err != nil {
 		return err
 	}
 	err = e.manifest.Sync()
@@ -641,7 +660,9 @@ func (e *Engine) flushLocked() error {
 	// Now we can update L1
 	e.memtable.Store(newMemtable())
 
-	e.wal.Clear()
+	if err := e.wal.Clear(); err != nil {
+		return err
+	}
 	e.flushCount++
 
 	return nil
@@ -690,7 +711,7 @@ func (e *Engine) compactLocked() error {
 
 		// Merge l0 with all of l1ssts[first:last+1].
 		merged := e.scan(nil, nil, nil, []*sst{l0}, l1ssts[first:last+1], false)
-		written, err := WriteSST(e.ObjectsPath(), merged, false)
+		written, err := WriteSST(e.fs, e.ObjectsPath(), merged, false)
 		merged.Close()
 		if err != nil {
 			return err
@@ -703,7 +724,7 @@ func (e *Engine) compactLocked() error {
 
 	// Only sync when there has been a write
 	if anyRewrite {
-		err := syncDir(e.ObjectsPath())
+		err := syncDir(e.fs, e.ObjectsPath())
 		if err != nil {
 			return err
 		}
@@ -712,15 +733,15 @@ func (e *Engine) compactLocked() error {
 	e.flushMutex.Lock()
 	defer e.flushMutex.Unlock()
 
-	new_l1_ssts := make([]string, len(new_ssts))
+	newL1Meta := make([]LevelMetadata, len(new_ssts))
 	for i, sst := range new_ssts {
-		new_l1_ssts[i] = sst.hash
+		newL1Meta[i] = LevelMetadata{hash: sst.hash, first: sst.firstKey, last: sst.lastKey}
 	}
 	// Order matters: L1 frame first, then L0. On a torn-tail crash the safe
 	// outcome is "only L1 landed" — reads from L0 still shadow L1 correctly
 	// with the same values. "L0 without L1" cannot happen because fd writes
 	// preserve offset order.
-	err := e.manifest.Update(levelL1, new_l1_ssts)
+	err := e.manifest.Update(levelL1, newL1Meta)
 	if err != nil {
 		return err
 	}
@@ -728,9 +749,9 @@ func (e *Engine) compactLocked() error {
 	newL1 := sstSlice(new_ssts)
 	e.l1ssts.Store(&newL1)
 
-	newL0Hashes := slices.Clone(e.manifest.L0Hashes())
-	newL0Hashes = newL0Hashes[:len(newL0Hashes)-len(l0ssts)]
-	if err := e.manifest.Update(levelL0, newL0Hashes); err != nil {
+	newL0Meta := slices.Clone(e.manifest.L0())
+	newL0Meta = newL0Meta[:len(newL0Meta)-len(l0ssts)]
+	if err := e.manifest.Update(levelL0, newL0Meta); err != nil {
 		return err
 	}
 	currentL0 := *e.l0ssts.Load()
@@ -751,12 +772,12 @@ func (e *Engine) compactLocked() error {
 	}
 	for _, oldSST := range originalL1ssts {
 		if !kept(oldSST.hash) {
-			_ = os.Remove(oldSST.path)
+			_ = e.fs.Remove(oldSST.path)
 		}
 	}
 	for _, oldSST := range l0ssts {
 		if !kept(oldSST.hash) {
-			_ = os.Remove(oldSST.path)
+			_ = e.fs.Remove(oldSST.path)
 		}
 	}
 
@@ -784,26 +805,24 @@ func isSSTHash(name string) bool {
 // gcLocked removes SST files in ObjectsPath() that are not referenced by
 // the manifest. Caller must hold compactionMutex and flushMutex.
 func (e *Engine) gcLocked() error {
-	l0 := e.manifest.L0Hashes()
-	l1 := e.manifest.L1Hashes()
+	l0 := e.manifest.L0()
+	l1 := e.manifest.L1()
 	referenced := make(map[string]struct{}, len(l0)+len(l1))
-	for _, h := range l0 {
-		referenced[h] = struct{}{}
+	for _, m := range l0 {
+		referenced[m.hash] = struct{}{}
 	}
-	for _, h := range l1 {
-		referenced[h] = struct{}{}
+	for _, m := range l1 {
+		referenced[m.hash] = struct{}{}
 	}
 
-	dirEntries, err := os.ReadDir(e.ObjectsPath())
+	dirEntries, err := e.fs.List(e.ObjectsPath())
 	if err != nil {
 		return err
 	}
 
-	for _, entry := range dirEntries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
+	for _, name := range dirEntries {
+		// Subdirs don't match the 64-char hex SST hash shape, so isSSTHash
+		// filters them out along with any in-flight "-temp-XYZ" names.
 		if !isSSTHash(name) {
 			continue
 		}
@@ -816,7 +835,7 @@ func (e *Engine) gcLocked() error {
 		// The fileTable's LRU entry is left to age out naturally — nothing
 		// will look this path up again since it's out of all manifests.
 		fullPath := filepath.Join(e.ObjectsPath(), name)
-		err := os.Remove(fullPath)
+		err := e.fs.Remove(fullPath)
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -836,7 +855,21 @@ type Transaction struct {
 	done     chan error
 }
 
-func (e *Engine) Transaction() Transaction {
+// transactionPool reuses Transaction structs + their underlying entries
+// slice capacity and done channel across commits. Transaction() always
+// returns a pointer now (previously a value) so Put/Delete's append on
+// tx.entries survives the pool round-trip.
+//
+// Safety: a pooled Transaction is only returned after Commit's queue
+// receive, at which point commitLoop is no longer reading it — the
+// happens-before from the done channel covers the handoff.
+var transactionPool = sync.Pool{
+	New: func() any {
+		return &Transaction{done: make(chan error, 1)}
+	},
+}
+
+func (e *Engine) Transaction() *Transaction {
 	// Write stall: if L0 is too tall, force a synchronous compaction before
 	// accepting the write. compactionMutex serializes so at most one writer
 	// actually runs the compaction; others wait here and re-check after.
@@ -851,10 +884,11 @@ func (e *Engine) Transaction() Transaction {
 		e.compactionMutex.Unlock()
 	}
 
-	return Transaction{
-		engine: e,
-		done:   make(chan error, 1),
-	}
+	tx := transactionPool.Get().(*Transaction)
+	tx.engine = e
+	tx.entries = tx.entries[:0]
+	tx.byteSize = 0
+	return tx
 }
 
 func (tx *Transaction) Put(key Key, value []byte) {
@@ -881,10 +915,15 @@ func (tx *Transaction) Get(key Key) ([]byte, error) {
 }
 
 func (tx *Transaction) Commit() error {
-	return tx.engine.queueTransaction(tx)
+	err := tx.engine.queueTransaction(tx)
+	tx.engine = nil
+	transactionPool.Put(tx)
+	return err
 }
 
 func (tx *Transaction) Cancel() {
+	tx.engine = nil
+	transactionPool.Put(tx)
 }
 
 func (e *Engine) queueTransaction(tx *Transaction) error {
@@ -930,6 +969,10 @@ func (e *Engine) commitLoop(counter int) error {
 	for node != nil {
 		tx := node.tx
 		batch := node.tx.engine.wal.Batch()
+		// Pre-size the batch buffer. Each frame adds 12 bytes of overhead
+		// (crc + key_len + val_len) on top of key+value bytes; +8 for the
+		// trailing commit marker. Close enough to skip the reallocation chain.
+		batch.Grow(tx.byteSize + 12*len(tx.entries) + 8)
 		for _, entry := range node.tx.entries {
 			if entry.value == nil {
 				batch.Delete(entry.key)

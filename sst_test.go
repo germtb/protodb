@@ -10,17 +10,24 @@ import (
 	"testing"
 )
 
+// metaFromSST builds a manifest LevelMetadata from a freshly-written *sst.
+// ReadSST needs first/last up front, and tests have them right there on
+// the sst struct returned by WriteSST.
+func metaFromSST(s *sst) LevelMetadata {
+	return LevelMetadata{hash: s.hash, first: s.firstKey, last: s.lastKey}
+}
+
 func writeTestSST(t *testing.T, pairs []KeyValue) (*sst, string) {
 	t.Helper()
 	dir := t.TempDir()
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ssts) == 0 {
 		return &sst{footer: sstFooter{}, blocks: nil, hash: ""}, dir
 	}
-	s, err := ReadSST(dir, ssts[0].hash, nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,12 +54,12 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		{key(3), []byte("foo")},
 	}
 
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := ReadSST(dir, ssts[0].hash, nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +85,7 @@ func TestEmptySST(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []KeyValue{}
 
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,13 +142,13 @@ func TestCustomTailSize(t *testing.T) {
 		{key(3), []byte("ccc")},
 	}
 
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// TailByteSize just enough for footer — forces re-read for block index
-	s, err := ReadSST(dir, ssts[0].hash, &ReaderOptions{TailByteSize: sstFooterSize})
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), &ReaderOptions{TailByteSize: sstFooterSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +167,7 @@ func TestCustomTailSize(t *testing.T) {
 }
 
 func TestReadNonExistentFile(t *testing.T) {
-	_, err := ReadSST("/no/such", "nonexistent", nil)
+	_, err := ReadSST(DefaultFS, "/no/such", LevelMetadata{hash: "nonexistent"}, nil)
 	if err == nil {
 		t.Fatal("expected error for non-existent file")
 	}
@@ -241,7 +248,7 @@ func TestWriteUnsortedKeysError(t *testing.T) {
 		{key(3), []byte("c")},
 		{key(1), []byte("a")},
 	}
-	_, err := WriteSST(dir, iter(pairs), true)
+	_, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if !errors.Is(err, ErrUnsortedKeys) {
 		t.Fatalf("expected ErrUnsortedKeys, got %v", err)
 	}
@@ -253,7 +260,7 @@ func TestWriteDuplicateKeysError(t *testing.T) {
 		{key(1), []byte("a")},
 		{key(1), []byte("b")},
 	}
-	_, err := WriteSST(dir, iter(pairs), true)
+	_, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if !errors.Is(err, ErrUnsortedKeys) {
 		t.Fatalf("expected ErrUnsortedKeys, got %v", err)
 	}
@@ -280,7 +287,7 @@ func TestReadBadVersionError(t *testing.T) {
 	pairs := []KeyValue{
 		{key(1), []byte("x")},
 	}
-	ssts, err := WriteSST(dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +306,7 @@ func TestReadBadVersionError(t *testing.T) {
 	f.WriteAt(buf[:], info.Size()-2)
 	f.Close()
 
-	_, err = ReadSST(dir, hash, nil)
+	_, err = ReadSST(DefaultFS, dir, LevelMetadata{hash: hash}, nil)
 	if !errors.Is(err, ErrUnsupportedVersion) {
 		t.Fatalf("expected ErrUnsupportedVersion, got %v", err)
 	}
