@@ -22,6 +22,7 @@ type Policy struct {
 	HardCompactionThreshold int
 	FlushThreshold          int
 	Sync                    bool
+	SSTCacheSize            int
 }
 
 type commitNode struct {
@@ -47,22 +48,74 @@ type Engine struct {
 	commitHead  atomic.Pointer[commitNode]
 	commitTail  atomic.Pointer[commitNode]
 	commitMutex sync.Mutex
+	sstCache    *sstClockCache
 
 	// Counters (updated under flushMutex / compactionMutex respectively).
 	flushCount      uint64
 	compactionCount uint64
 }
 
+const DefaultSSTCacheSize = 32
+
+type sstClockCache struct {
+	mu       sync.Mutex
+	capacity int
+	slots    []*sst
+	hand     int // next slot to inspect for eviction
+}
+
+func newSSTClockCache(capacity int) *sstClockCache {
+	return &sstClockCache{
+		capacity: capacity,
+		slots:    make([]*sst, 0, capacity),
+	}
+}
+
+func (c *sstClockCache) Touch(s *sst) {
+	if s.referenced.Load() {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s.referenced.Store(true)
+	if slices.Contains(c.slots, s) {
+		return
+	}
+	if len(c.slots) < c.capacity {
+		c.slots = append(c.slots, s)
+		return
+	}
+	for {
+		victim := c.slots[c.hand]
+		if victim.referenced.Load() {
+			victim.referenced.Store(false)
+			c.hand = (c.hand + 1) % c.capacity
+			continue
+		}
+		victim.clearCache()
+		// Reset the evicted SST's bit so a future Touch re-registers it.
+		victim.referenced.Store(false)
+		c.slots[c.hand] = s
+		c.hand = (c.hand + 1) % c.capacity
+		return
+	}
+}
+
 type EngineOption func(*engineConfig)
 
 type engineConfig struct {
-	fs FS
+	fs           FS
+	sstCacheSize int
 }
 
 // WithFS overrides the filesystem used by the engine. Defaults to DefaultFS
 // (os-backed). Primarily for tests / error injection.
 func WithFS(fs FS) EngineOption {
 	return func(c *engineConfig) { c.fs = fs }
+}
+
+func WithSSTCacheSize(size int) EngineOption {
+	return func(c *engineConfig) { c.sstCacheSize = size }
 }
 
 func loadSSTs(fs FS, objectsPath string, metadata []LevelMetadata) ([]*sst, error) {
@@ -78,7 +131,7 @@ func loadSSTs(fs FS, objectsPath string, metadata []LevelMetadata) ([]*sst, erro
 }
 
 func Open(path string, options ...EngineOption) (*Engine, error) {
-	config := engineConfig{fs: DefaultFS}
+	config := engineConfig{fs: DefaultFS, sstCacheSize: DefaultSSTCacheSize}
 	for _, opt := range options {
 		opt(&config)
 	}
@@ -132,6 +185,7 @@ func Open(path string, options ...EngineOption) (*Engine, error) {
 		},
 	}
 
+	e.sstCache = newSSTClockCache(config.sstCacheSize)
 	e.commitHead.Store(sentinel)
 	e.commitTail.Store(sentinel)
 	e.seqnum.Store(0)
@@ -214,7 +268,13 @@ func (e *Engine) Delete(key Key) error {
 	return tx.Commit()
 }
 
+func (e *Engine) touchSSTCache(s *sst) {
+	e.sstCache.Touch(s)
+}
+
 func (e *Engine) GetInSST(s *sst, key Key) ([]byte, error) {
+	e.touchSSTCache(s)
+
 	handle, err := e.fileTable.getOrOpen(s.path)
 	if err != nil {
 		return nil, err
@@ -290,6 +350,7 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 
 	// 2. L0 SSTs (newest first — captured above)
 	for _, s := range l0ssts {
+		e.touchSSTCache(s)
 		handle, err := e.fileTable.getOrOpen(s.path)
 		if err != nil {
 			return nil, err
@@ -350,6 +411,7 @@ func (e *Engine) BulkGet(keys []Key) ([][]byte, error) {
 		}
 
 		s := l1ssts[sstIdx]
+		e.touchSSTCache(s)
 		handle, err := e.fileTable.getOrOpen(s.path)
 		if err != nil {
 			return nil, err
@@ -534,7 +596,7 @@ func (e *Engine) scanImpl(lo Key, hi Key, reverse bool) Iterator {
 		sources = append(sources, activeMemtable.Scan(lo, hi, seqnum))
 	}
 
-	scanIter := e.scan(lo, hi, nil, l0ssts, l1ssts, reverse)
+	scanIter := e.scan(lo, hi, nil, l0ssts, l1ssts, reverse, true)
 	sources = append(sources, scanIter)
 
 	if len(sources) == 1 {
@@ -544,7 +606,8 @@ func (e *Engine) scanImpl(lo Key, hi Key, reverse bool) Iterator {
 	return skipTombstones(newMergeIterator(sources, reverse))
 }
 
-func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts []*sst, reverse bool) Iterator {
+// scan builds an iterator across memtable + L0 + L1.
+func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts []*sst, reverse bool, cache bool) Iterator {
 	var sources []Iterator
 
 	if memtable != nil && memtable.Len() > 0 {
@@ -556,7 +619,10 @@ func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts 
 		if err != nil {
 			continue
 		}
-		sources = append(sources, s.Iterator(lo, hi, handle, reverse))
+		if cache {
+			e.touchSSTCache(s)
+		}
+		sources = append(sources, s.Iterator(lo, hi, handle, reverse, cache))
 	}
 
 	// L1 SSTs are non-overlapping and sorted, so we walk them as a single
@@ -566,12 +632,18 @@ func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts 
 		if err != nil {
 			return newMergeIterator(sources, reverse)
 		}
-		sources = append(sources, l1ssts[0].Iterator(lo, hi, handle, reverse))
+		if cache {
+			e.touchSSTCache(l1ssts[0])
+		}
+		sources = append(sources, l1ssts[0].Iterator(lo, hi, handle, reverse, cache))
 	} else if len(l1ssts) > 1 {
 		opener := func(s *sst) (reader, error) {
+			if cache {
+				e.touchSSTCache(s)
+			}
 			return e.fileTable.getOrOpen(s.path)
 		}
-		sources = append(sources, newSSTConcatIterator(l1ssts, lo, hi, opener, reverse))
+		sources = append(sources, newSSTConcatIterator(l1ssts, lo, hi, opener, reverse, cache))
 	}
 
 	if len(sources) == 1 {
@@ -595,8 +667,6 @@ func (e *Engine) maybeFlush() error {
 	// Auto-flush triggers a background compaction. Manual Flush() does not —
 	// tests that inspect L0/L1 state immediately after Flush() rely on it
 	// being a synchronous, side-effect-free checkpoint.
-	// A zero/negative soft threshold disables the auto-compaction path,
-	// matching the HardCompactionThreshold convention.
 	if soft := e.policy.SoftCompactionThreshold; soft > 0 && len(*e.l0ssts.Load()) > soft {
 		if e.compactionMutex.TryLock() {
 			go func() {
@@ -709,8 +779,10 @@ func (e *Engine) compactLocked() error {
 			continue
 		}
 
-		// Merge l0 with all of l1ssts[first:last+1].
-		merged := e.scan(nil, nil, nil, []*sst{l0}, l1ssts[first:last+1], false)
+		// Merge l0 with all of l1ssts[first:last+1]. cache=false: this is
+		// a one-shot read, caching its blocks would just trash the cache
+		// for foreground readers.
+		merged := e.scan(nil, nil, nil, []*sst{l0}, l1ssts[first:last+1], false, false)
 		written, err := WriteSST(e.fs, e.ObjectsPath(), merged, false)
 		merged.Close()
 		if err != nil {

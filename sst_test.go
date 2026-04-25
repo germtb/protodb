@@ -449,7 +449,7 @@ func TestScanFullRange(t *testing.T) {
 
 	var keys []Key
 	var vals []string
-	iter := s.Iterator(key(0), key(100), f, false)
+	iter := s.Iterator(key(0), key(100), f, false, true)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 		vals = append(vals, string(iter.Current().Value))
@@ -477,7 +477,7 @@ func TestScanSubRange(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	var keys []Key
-	iter := s.Iterator(key(20), key(40), f, false)
+	iter := s.Iterator(key(20), key(40), f, false, true)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 	}
@@ -495,7 +495,7 @@ func TestScanEmptySST(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	count := 0
-	iter := s.Iterator(key(0), key(100), f, false)
+	iter := s.Iterator(key(0), key(100), f, false, true)
 	for iter.Next() {
 		count++
 	}
@@ -512,7 +512,7 @@ func TestScanNoMatch(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	count := 0
-	iter := s.Iterator(key(50), key(100), f, false)
+	iter := s.Iterator(key(50), key(100), f, false, true)
 	for iter.Next() {
 		count++
 	}
@@ -528,7 +528,7 @@ func TestScanSingleEntry(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	var keys []Key
-	iter := s.Iterator(key(0), key(100), f, false)
+	iter := s.Iterator(key(0), key(100), f, false, true)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 	}
@@ -547,7 +547,7 @@ func TestScanExactBoundaries(t *testing.T) {
 
 	// lo is inclusive, hi is exclusive
 	var keys []Key
-	iter := s.Iterator(key(10), key(30), f, false)
+	iter := s.Iterator(key(10), key(30), f, false, true)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 	}
@@ -570,7 +570,7 @@ func TestScanBreakEarly(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	var keys []Key
-	iter := s.Iterator(key(0), key(100), f, false)
+	iter := s.Iterator(key(0), key(100), f, false, true)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 		if len(keys) == 2 {
@@ -594,7 +594,7 @@ func TestScanEmptyValues(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	var vals []string
-	iter := s.Iterator(key(0), key(100), f, false)
+	iter := s.Iterator(key(0), key(100), f, false, true)
 	for iter.Next() {
 		vals = append(vals, string(iter.Current().Value))
 	}
@@ -614,7 +614,7 @@ func TestScanLastEntry(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	var vals []string
-	iter := s.Iterator(key(20), key(100), f, false)
+	iter := s.Iterator(key(20), key(100), f, false, true)
 	for iter.Next() {
 		vals = append(vals, string(iter.Current().Value))
 	}
@@ -667,7 +667,7 @@ func TestScanYieldsTombstones(t *testing.T) {
 
 	var keys []Key
 	var tombstones []Key
-	iter := s.Iterator(key(0), key(100), f, false)
+	iter := s.Iterator(key(0), key(100), f, false, true)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 		if iter.Current().Value == nil {
@@ -741,7 +741,7 @@ func TestAllTombstones(t *testing.T) {
 	}
 
 	var tombstones []Key
-	iter := s.Iterator(key(0), key(100), f, false)
+	iter := s.Iterator(key(0), key(100), f, false, true)
 	for iter.Next() {
 		if iter.Current().Value != nil {
 			t.Errorf("Scan(%v): expected nil value for tombstone", iter.Current().Key)
@@ -820,10 +820,10 @@ func TestGetCorruptedKeyLenNoPanic(t *testing.T) {
 
 	// Inject into an sst's block cache so Get uses it directly
 	s := &sst{
-		cache:  newLRU[uint64, sstBlock](128, nil),
+		cache:  make(map[uint64]sstBlock),
 		blocks: []sstBlockIndex{{FirstKey: key(0), Offset: 0, Length: uint32(len(data))}},
 	}
-	s.cache.Put(0, sstBlock{data: data})
+	s.cache[0] = sstBlock{data: data}
 
 	// This must not panic — should return an error
 	defer func() {
