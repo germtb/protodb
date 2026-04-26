@@ -7,10 +7,6 @@ import (
 // FileTable is a refcounted LRU of open file handles. Each getOrOpen call
 // returns a shared FileHandle and increments its refcount. The caller must
 // Close exactly once when done — the fd stays open while refs > 0.
-//
-// LRU eviction only removes the entry from the lookup map and nils its
-// list element; the fd keeps living until the last holder Closes. Callers
-// that already hold a handle can keep reading even after eviction.
 type FileTable struct {
 	mu       sync.Mutex
 	fs       FS
@@ -20,10 +16,6 @@ type FileTable struct {
 	capacity int
 }
 
-// FileHandle is a shared, refcounted handle to a cached File. It implements
-// the `reader` interface. Callers get one via FileTable.getOrOpen and must
-// Close it exactly once. Close is NOT idempotent at this layer —
-// iterator-level wrappers should guard against double-close with a nil check.
 type FileHandle struct {
 	file File
 	path string

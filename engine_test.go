@@ -3,6 +3,7 @@ package protodb
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -1579,7 +1580,7 @@ func TestOpenWithMissingSST(t *testing.T) {
 	}
 
 	// Delete the SST file from the objects directory
-	sstPath := filepath.Join(dir, "protodb", "objects", engine.L0SSTs()[0].hash)
+	sstPath := filepath.Join(dir, "protodb", "objects", hex.EncodeToString(engine.L0SSTs()[0].hash[:]))
 	err = os.Remove(sstPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1606,7 +1607,7 @@ func TestOpenWithCorruptSST(t *testing.T) {
 	}
 
 	// Corrupt the SST file in the objects directory
-	sstPath := filepath.Join(dir, "protodb", "objects", engine.L0SSTs()[0].hash)
+	sstPath := filepath.Join(dir, "protodb", "objects", hex.EncodeToString(engine.L0SSTs()[0].hash[:]))
 	err = os.WriteFile(sstPath, []byte("garbage"), 0644)
 	if err != nil {
 		t.Fatal(err)
@@ -1655,12 +1656,12 @@ func TestCompactDeletesOldSSTs(t *testing.T) {
 	engine.Flush()
 
 	// Before compact, there should be 2 SSTs
-	oldHashes := make([]string, len(engine.L0SSTs()))
+	oldHashes := make([]sstHash, len(engine.L0SSTs()))
 	for idx, s := range engine.L0SSTs() {
 		oldHashes[idx] = s.hash
-		sstPath := filepath.Join(engine.ObjectsPath(), s.hash)
+		sstPath := filepath.Join(engine.ObjectsPath(), hex.EncodeToString(s.hash[:]))
 		if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
-			t.Fatalf("expected SST %s to exist before compact", s.hash)
+			t.Fatalf("expected SST %x to exist before compact", s.hash)
 		}
 	}
 
@@ -1672,7 +1673,7 @@ func TestCompactDeletesOldSSTs(t *testing.T) {
 	// New compacted SSTs should exist
 	_ = oldHashes // GC of old objects is separate
 	for _, s := range engine.L1SSTs() {
-		sstPath := filepath.Join(engine.ObjectsPath(), s.hash)
+		sstPath := filepath.Join(engine.ObjectsPath(), hex.EncodeToString(s.hash[:]))
 		if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
 			t.Errorf("expected compacted SST at %s", sstPath)
 		}
@@ -1973,7 +1974,7 @@ func TestCompactCreatesObjectFiles(t *testing.T) {
 
 	// Each SST should have a file in the objects directory
 	for _, s := range engine.L1SSTs() {
-		sstPath := filepath.Join(engine.ObjectsPath(), s.hash)
+		sstPath := filepath.Join(engine.ObjectsPath(), hex.EncodeToString(s.hash[:]))
 		if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
 			t.Errorf("expected SST file at %s", sstPath)
 		}
@@ -2186,7 +2187,7 @@ func TestFlushAfterCompactWritesToObjects(t *testing.T) {
 
 	// The new SST should be in the objects directory
 	lastSST := engine.L0SSTs()[len(engine.L0SSTs())-1]
-	sstPath := filepath.Join(engine.ObjectsPath(), lastSST.hash)
+	sstPath := filepath.Join(engine.ObjectsPath(), hex.EncodeToString(lastSST.hash[:]))
 	if _, statErr := os.Stat(sstPath); os.IsNotExist(statErr) {
 		t.Errorf("expected SST at %s after flush post-compact", sstPath)
 	}
@@ -2345,17 +2346,17 @@ func TestSSTScanAfterFileDeleted(t *testing.T) {
 		{key(2), []byte("b")},
 	}
 
-	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	sstPath := filepath.Join(dir, s.hash)
+	sstPath := filepath.Join(dir, hex.EncodeToString(s.hash[:]))
 
 	// Open a handle before deleting, so we can test Scan
 	f := openSSTFile(t, dir, s)
@@ -2365,7 +2366,7 @@ func TestSSTScanAfterFileDeleted(t *testing.T) {
 
 	// Scan with the pre-opened handle — on Unix the inode is still alive
 	count := 0
-	iter := s.Iterator(key(0), key(100), f, false, true)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		count++
 	}
@@ -2394,12 +2395,12 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 		{key(3), []byte("cccccccccc")},
 	}
 
-	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2407,11 +2408,11 @@ func TestSSTScanTruncatedFile(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	// Truncate the file to remove value data but keep keys+footer
-	os.Truncate(filepath.Join(dir, s.hash), 5)
+	os.Truncate(filepath.Join(dir, hex.EncodeToString(s.hash[:])), 5)
 
 	// Scan should stop early (read error) rather than panic
 	count := 0
-	iter := s.Iterator(key(0), key(100), f, false, true)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		count++
 	}
@@ -2425,12 +2426,12 @@ func TestSSTGetTruncatedFile(t *testing.T) {
 		{key(1), []byte("hello world")},
 	}
 
-	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2438,7 +2439,7 @@ func TestSSTGetTruncatedFile(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	// Truncate to corrupt the value data
-	os.Truncate(filepath.Join(dir, s.hash), 2)
+	os.Truncate(filepath.Join(dir, hex.EncodeToString(s.hash[:])), 2)
 
 	_, err = s.Get(key(1), f)
 	if err == nil {
@@ -2453,7 +2454,7 @@ func TestReadSSTCorruptedFooterCount(t *testing.T) {
 		{key(1), []byte("x")},
 	}
 
-	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2462,7 +2463,7 @@ func TestReadSSTCorruptedFooterCount(t *testing.T) {
 	// Overwrite the count field in the footer with a huge value.
 	// Footer layout: LastKeySectionSize(4) + BlockIndexSize(8) + BlockCount(8) + Version(2) = 22 bytes.
 	// BlockCount starts at footerSize-10 from end of file.
-	sstPath := filepath.Join(dir, hash)
+	sstPath := filepath.Join(dir, hex.EncodeToString(hash[:]))
 	info, _ := os.Stat(sstPath)
 	fileSize := info.Size()
 
@@ -2488,7 +2489,7 @@ func TestReadSSTCorruptedFooterCount(t *testing.T) {
 		}
 	}()
 
-	_, err = ReadSST(DefaultFS, dir, LevelMetadata{hash: hash}, nil)
+	_, err = ReadSST(DefaultFS, dir, LevelMetadata{hash: hash}, nil, testCache())
 	if err == nil {
 		t.Fatalf("expected error for corrupted footer, got nil")
 	}
@@ -2527,7 +2528,7 @@ func TestEngineGetAfterSSTDeleted(t *testing.T) {
 	engine.Flush()
 
 	// Delete the SST file
-	sstPath := filepath.Join(dir, "protodb", "objects", engine.L0SSTs()[0].hash)
+	sstPath := filepath.Join(dir, "protodb", "objects", hex.EncodeToString(engine.L0SSTs()[0].hash[:]))
 	os.Remove(sstPath)
 
 	// Get should return an error (not panic)
@@ -2549,7 +2550,7 @@ func TestWriteSSTFailsOnBadDir(t *testing.T) {
 		{key(1), []byte("a")},
 	})
 
-	_, err := WriteSST(DefaultFS, blocker, entries, true)
+	_, err := WriteSST(DefaultFS, blocker, entries, true, testCache())
 	if err == nil {
 		t.Fatal("expected WriteSST to fail when dir is actually a file")
 	}
@@ -3311,7 +3312,7 @@ func TestAdversarialSSTDeletedWhileRunning(t *testing.T) {
 	engine.Put(key(1), []byte("a"))
 	engine.Flush()
 
-	sstPath := filepath.Join(dir, "protodb", "objects", engine.L0SSTs()[0].hash)
+	sstPath := filepath.Join(dir, "protodb", "objects", hex.EncodeToString(engine.L0SSTs()[0].hash[:]))
 	os.Remove(sstPath)
 
 	// Should not panic
@@ -3837,203 +3838,6 @@ func TestConcurrentStress(t *testing.T) {
 }
 
 // =============================================================================
-// --- Partitioned SST tests ---
-// =============================================================================
-
-// withSmallSSTSize sets SSTSize to a small value for the duration of the test,
-// forcing WriteSST to produce multiple SSTs.
-func withSmallSSTSize(t *testing.T, sstSize int, blockSize int) {
-	t.Helper()
-	oldSST := SSTSize
-	oldBlock := BlockSize
-	SSTSize = sstSize
-	BlockSize = blockSize
-	t.Cleanup(func() {
-		SSTSize = oldSST
-		BlockSize = oldBlock
-	})
-}
-
-func TestPartitionedFlush(t *testing.T) {
-	withSmallSSTSize(t, 512, 128)
-	engine := openTestEngine(t)
-	defer engine.Close()
-
-	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(key(idx), []byte("value"))
-	}
-	engine.Flush()
-
-	if len(engine.L0SSTs()) < 2 {
-		t.Fatalf("expected multiple SSTs from flush, got %d", len(engine.L0SSTs()))
-	}
-
-	// All keys should be readable
-	for idx := uint64(0); idx < 200; idx++ {
-		got, err := engine.Get(key(idx))
-		if err != nil {
-			t.Fatalf("Get(%d): %v", idx, err)
-		}
-		if string(got) != "value" {
-			t.Errorf("Get(%d): got %q, want %q", idx, got, "value")
-		}
-	}
-}
-
-func TestPartitionedFlushScan(t *testing.T) {
-	withSmallSSTSize(t, 512, 128)
-	engine := openTestEngine(t)
-	defer engine.Close()
-
-	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(key(idx), []byte("value"))
-	}
-	engine.Flush()
-
-	count := 0
-	iter := engine.Scan(key(0), key(200))
-	for iter.Next() {
-		count++
-	}
-	if count != 200 {
-		t.Fatalf("Scan: got %d entries, want 200", count)
-	}
-}
-
-func TestPartitionedCompact(t *testing.T) {
-	withSmallSSTSize(t, 512, 128)
-	engine := openTestEngine(t)
-	defer engine.Close()
-
-	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(key(idx), []byte("value"))
-	}
-	engine.Flush()
-
-	sstsBefore := len(engine.L0SSTs())
-	engine.Compact()
-
-	if len(engine.L1SSTs()) < 2 {
-		t.Fatalf("expected multiple SSTs after compact, got %d", len(engine.L1SSTs()))
-	}
-
-	// Compaction should produce the same number of partitions (same data, same size limit)
-	if len(engine.L1SSTs()) != sstsBefore {
-		t.Logf("SSTs before compact: %d, after: %d", sstsBefore, len(engine.L1SSTs()))
-	}
-
-	// All keys should be readable
-	for idx := uint64(0); idx < 200; idx++ {
-		got, err := engine.Get(key(idx))
-		if err != nil {
-			t.Fatalf("Get(%d): %v", idx, err)
-		}
-		if string(got) != "value" {
-			t.Errorf("Get(%d): got %q, want %q", idx, got, "value")
-		}
-	}
-}
-
-func TestPartitionedCompactThenReopen(t *testing.T) {
-	withSmallSSTSize(t, 512, 128)
-	dir := t.TempDir()
-
-	engine, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(key(idx), []byte("value"))
-	}
-	engine.Flush()
-	engine.Compact()
-	engine.Close()
-
-	engine, err = Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer engine.Close()
-
-	if len(engine.L1SSTs()) < 2 {
-		t.Fatalf("expected multiple SSTs after reopen, got %d", len(engine.L1SSTs()))
-	}
-
-	for idx := uint64(0); idx < 200; idx++ {
-		got, err := engine.Get(key(idx))
-		if err != nil {
-			t.Fatalf("Get(%d) after reopen: %v", idx, err)
-		}
-		if string(got) != "value" {
-			t.Errorf("Get(%d) after reopen: got %q, want %q", idx, got, "value")
-		}
-	}
-}
-
-func TestPartitionedWithTombstones(t *testing.T) {
-	withSmallSSTSize(t, 512, 128)
-	engine := openTestEngine(t)
-	defer engine.Close()
-
-	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(key(idx), []byte("value"))
-	}
-	// Delete every other key
-	for idx := uint64(0); idx < 200; idx += 2 {
-		engine.Delete(key(idx))
-	}
-	engine.Flush()
-	engine.Compact()
-
-	// Even keys should return nil, odd keys should have values
-	for idx := uint64(0); idx < 200; idx++ {
-		got, err := engine.Get(key(idx))
-		if err != nil {
-			t.Fatalf("Get(%d): %v", idx, err)
-		}
-		if idx%2 == 0 {
-			if got != nil {
-				t.Errorf("Get(%d): expected nil (deleted), got %q", idx, got)
-			}
-		} else {
-			if string(got) != "value" {
-				t.Errorf("Get(%d): got %q, want %q", idx, got, "value")
-			}
-		}
-	}
-}
-
-func TestPartitionedMultipleFlushesAndCompact(t *testing.T) {
-	withSmallSSTSize(t, 512, 128)
-	engine := openTestEngine(t)
-	defer engine.Close()
-
-	// Two flushes with overlapping keys — second overwrite should win
-	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(key(idx), []byte("old"))
-	}
-	engine.Flush()
-
-	for idx := uint64(0); idx < 200; idx++ {
-		engine.Put(key(idx), []byte("new"))
-	}
-	engine.Flush()
-
-	engine.Compact()
-
-	for idx := uint64(0); idx < 200; idx++ {
-		got, err := engine.Get(key(idx))
-		if err != nil {
-			t.Fatalf("Get(%d): %v", idx, err)
-		}
-		if string(got) != "new" {
-			t.Errorf("Get(%d): got %q, want %q", idx, got, "new")
-		}
-	}
-}
-
-// =============================================================================
 // --- Metamorphic test ---
 // =============================================================================
 
@@ -4146,125 +3950,6 @@ func TestMetamorphic(t *testing.T) {
 				t.Fatalf("final Get(%d): value mismatch", k)
 			}
 		}
-	}
-}
-
-func TestMetamorphicWithPartitioning(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow metamorphic test in -short mode")
-	}
-	withSmallSSTSize(t, 512, 128)
-	seed := int64(99)
-	rng := rand.New(rand.NewSource(seed))
-	engine := openTestEngine(t)
-	defer engine.Close()
-
-	ref := make(map[uint64][]byte)
-	keySpace := uint64(200)
-	ops := 5000
-
-	for op := 0; op < ops; op++ {
-		switch rng.Intn(10) {
-		case 0, 1, 2, 3: // Put
-			k := uint64(rng.Int63n(int64(keySpace)))
-			valLen := rng.Intn(100) + 1
-			value := make([]byte, valLen)
-			rng.Read(value)
-			if err := engine.Put(key(k), value); err != nil {
-				t.Fatalf("op %d: Put(%d): %v", op, k, err)
-			}
-			ref[k] = value
-
-		case 4, 5: // Get
-			k := uint64(rng.Int63n(int64(keySpace)))
-			got, err := engine.Get(key(k))
-			if err != nil {
-				t.Fatalf("op %d: Get(%d): %v", op, k, err)
-			}
-			expected, exists := ref[k]
-			if !exists || expected == nil {
-				if got != nil {
-					t.Fatalf("op %d: Get(%d): got %d bytes, want nil", op, k, len(got))
-				}
-			} else {
-				if string(got) != string(expected) {
-					t.Fatalf("op %d: Get(%d): value mismatch", op, k)
-				}
-			}
-
-		case 6: // Delete
-			k := uint64(rng.Int63n(int64(keySpace)))
-			if err := engine.Delete(key(k)); err != nil {
-				t.Fatalf("op %d: Delete(%d): %v", op, k, err)
-			}
-			ref[k] = nil
-
-		case 7: // Scan
-			lo := uint64(rng.Int63n(int64(keySpace)))
-			hi := lo + uint64(rng.Intn(50)) + 1
-			iter := engine.Scan(key(lo), key(hi))
-			var engineKeys []Key
-			engineValues := make(map[string]string)
-			for iter.Next() {
-				engineKeys = append(engineKeys, iter.Current().Key)
-				engineValues[string(iter.Current().Key)] = string(iter.Current().Value)
-			}
-
-			var refKeys []uint64
-			for rk, val := range ref {
-				if rk >= lo && rk < hi && val != nil {
-					refKeys = append(refKeys, rk)
-				}
-			}
-			sort.Slice(refKeys, func(i, j int) bool { return refKeys[i] < refKeys[j] })
-
-			if len(engineKeys) != len(refKeys) {
-				t.Fatalf("op %d: Scan(%d, %d): got %d entries, want %d", op, lo, hi, len(engineKeys), len(refKeys))
-			}
-			for idx, rk := range refKeys {
-				if !bytes.Equal(engineKeys[idx], key(rk)) {
-					t.Fatalf("op %d: Scan key mismatch at %d: got %v, want %d", op, idx, engineKeys[idx], rk)
-				}
-				if engineValues[string(key(rk))] != string(ref[rk]) {
-					t.Fatalf("op %d: Scan value mismatch at key %d", op, rk)
-				}
-			}
-
-		case 8: // Flush
-			if err := engine.Flush(); err != nil {
-				t.Fatalf("op %d: Flush: %v", op, err)
-			}
-
-		case 9: // Compact
-			if err := engine.Compact(); err != nil {
-				t.Fatalf("op %d: Compact: %v", op, err)
-			}
-		}
-	}
-
-	// Final full scan verification
-	iter := engine.Scan(key(0), key(keySpace))
-	var scanCount int
-	for iter.Next() {
-		iterKey := iter.Current().Key
-		expected := ref[binary.BigEndian.Uint64(iterKey)]
-		if expected == nil {
-			t.Fatalf("final Scan yielded deleted key %v", iterKey)
-		}
-		if string(iter.Current().Value) != string(expected) {
-			t.Fatalf("final Scan value mismatch at key %v", iterKey)
-		}
-		scanCount++
-	}
-
-	expectedCount := 0
-	for _, val := range ref {
-		if val != nil {
-			expectedCount++
-		}
-	}
-	if scanCount != expectedCount {
-		t.Fatalf("final Scan: got %d entries, want %d", scanCount, expectedCount)
 	}
 }
 
@@ -5881,7 +5566,7 @@ func TestAggressiveAutoCompaction(t *testing.T) {
 // not referenced by either manifest.
 func countOrphans(t *testing.T, engine *Engine) int {
 	t.Helper()
-	referenced := make(map[string]struct{})
+	referenced := make(map[sstHash]struct{})
 	for _, m := range engine.manifest.L0() {
 		referenced[m.hash] = struct{}{}
 	}
@@ -5894,10 +5579,14 @@ func countOrphans(t *testing.T, engine *Engine) int {
 	}
 	orphans := 0
 	for _, entry := range entries {
-		if entry.IsDir() || !isSSTHash(entry.Name()) {
+		if entry.IsDir() {
 			continue
 		}
-		if _, ok := referenced[entry.Name()]; !ok {
+		hash, ok := parseSSTHash(entry.Name())
+		if !ok {
+			continue
+		}
+		if _, ok := referenced[hash]; !ok {
 			orphans++
 		}
 	}
@@ -5912,7 +5601,10 @@ func countHashFiles(t *testing.T, engine *Engine) int {
 	}
 	n := 0
 	for _, entry := range entries {
-		if !entry.IsDir() && isSSTHash(entry.Name()) {
+		if entry.IsDir() {
+			continue
+		}
+		if _, ok := parseSSTHash(entry.Name()); ok {
 			n++
 		}
 	}

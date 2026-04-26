@@ -3,6 +3,7 @@ package protodb
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"hash/crc32"
 	"os"
@@ -17,17 +18,25 @@ func metaFromSST(s *sst) LevelMetadata {
 	return LevelMetadata{hash: s.hash, first: s.firstKey, last: s.lastKey}
 }
 
+// testCache returns a fresh block cache for tests that exercise WriteSST
+// or ReadSST directly. The cap is generous; tests that want to exercise
+// eviction set their own.
+func testCache() *blockCache {
+	return newBlockCache(1 << 20)
+}
+
 func writeTestSST(t *testing.T, pairs []KeyValue) (*sst, string) {
 	t.Helper()
 	dir := t.TempDir()
-	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	cache := testCache()
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ssts) == 0 {
-		return &sst{footer: sstFooter{}, blocks: nil, hash: ""}, dir
+		return &sst{footer: sstFooter{}, blocks: nil, hash: sstHash{}, cache: cache}, dir
 	}
-	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +45,12 @@ func writeTestSST(t *testing.T, pairs []KeyValue) (*sst, string) {
 
 func openSSTFile(t *testing.T, dir string, s *sst) *os.File {
 	t.Helper()
-	f, err := os.Open(filepath.Join(dir, s.hash))
+	if s.hash == (sstHash{}) {
+		// Empty SST: writeTestSST returned a placeholder with no on-disk file.
+		// Get/Iterator on an empty SST never read, so a nil handle is fine.
+		return nil
+	}
+	f, err := os.Open(filepath.Join(dir, hex.EncodeToString(s.hash[:])))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,12 +68,12 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		{key(3), []byte("foo")},
 	}
 
-	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil)
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), nil, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +99,7 @@ func TestEmptySST(t *testing.T) {
 	dir := t.TempDir()
 	pairs := []KeyValue{}
 
-	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,13 +156,13 @@ func TestCustomTailSize(t *testing.T) {
 		{key(3), []byte("ccc")},
 	}
 
-	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// TailByteSize just enough for footer — forces re-read for block index
-	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), &ReaderOptions{TailByteSize: sstFooterSize})
+	s, err := ReadSST(DefaultFS, dir, metaFromSST(ssts[0]), &ReaderOptions{TailByteSize: sstFooterSize}, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +181,7 @@ func TestCustomTailSize(t *testing.T) {
 }
 
 func TestReadNonExistentFile(t *testing.T) {
-	_, err := ReadSST(DefaultFS, "/no/such", LevelMetadata{hash: "nonexistent"}, nil)
+	_, err := ReadSST(DefaultFS, "/no/such", LevelMetadata{hash: sstHash{}}, nil, testCache())
 	if err == nil {
 		t.Fatal("expected error for non-existent file")
 	}
@@ -248,7 +262,7 @@ func TestWriteUnsortedKeysError(t *testing.T) {
 		{key(3), []byte("c")},
 		{key(1), []byte("a")},
 	}
-	_, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	_, err := WriteSST(DefaultFS, dir, iter(pairs), true, testCache())
 	if !errors.Is(err, ErrUnsortedKeys) {
 		t.Fatalf("expected ErrUnsortedKeys, got %v", err)
 	}
@@ -260,7 +274,7 @@ func TestWriteDuplicateKeysError(t *testing.T) {
 		{key(1), []byte("a")},
 		{key(1), []byte("b")},
 	}
-	_, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	_, err := WriteSST(DefaultFS, dir, iter(pairs), true, testCache())
 	if !errors.Is(err, ErrUnsortedKeys) {
 		t.Fatalf("expected ErrUnsortedKeys, got %v", err)
 	}
@@ -287,13 +301,13 @@ func TestReadBadVersionError(t *testing.T) {
 	pairs := []KeyValue{
 		{key(1), []byte("x")},
 	}
-	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true)
+	ssts, err := WriteSST(DefaultFS, dir, iter(pairs), true, testCache())
 	if err != nil {
 		t.Fatal(err)
 	}
 	hash := ssts[0].hash
 
-	sstPath := filepath.Join(dir, hash)
+	sstPath := filepath.Join(dir, hex.EncodeToString(hash[:]))
 	f, err := os.OpenFile(sstPath, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -306,7 +320,7 @@ func TestReadBadVersionError(t *testing.T) {
 	f.WriteAt(buf[:], info.Size()-2)
 	f.Close()
 
-	_, err = ReadSST(DefaultFS, dir, LevelMetadata{hash: hash}, nil)
+	_, err = ReadSST(DefaultFS, dir, LevelMetadata{hash: hash}, nil, testCache())
 	if !errors.Is(err, ErrUnsupportedVersion) {
 		t.Fatalf("expected ErrUnsupportedVersion, got %v", err)
 	}
@@ -449,7 +463,7 @@ func TestScanFullRange(t *testing.T) {
 
 	var keys []Key
 	var vals []string
-	iter := s.Iterator(key(0), key(100), f, false, true)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 		vals = append(vals, string(iter.Current().Value))
@@ -477,7 +491,7 @@ func TestScanSubRange(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	var keys []Key
-	iter := s.Iterator(key(20), key(40), f, false, true)
+	iter := s.Iterator(key(20), key(40), f, false)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 	}
@@ -495,7 +509,7 @@ func TestScanEmptySST(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	count := 0
-	iter := s.Iterator(key(0), key(100), f, false, true)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		count++
 	}
@@ -512,7 +526,7 @@ func TestScanNoMatch(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	count := 0
-	iter := s.Iterator(key(50), key(100), f, false, true)
+	iter := s.Iterator(key(50), key(100), f, false)
 	for iter.Next() {
 		count++
 	}
@@ -528,7 +542,7 @@ func TestScanSingleEntry(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	var keys []Key
-	iter := s.Iterator(key(0), key(100), f, false, true)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 	}
@@ -547,7 +561,7 @@ func TestScanExactBoundaries(t *testing.T) {
 
 	// lo is inclusive, hi is exclusive
 	var keys []Key
-	iter := s.Iterator(key(10), key(30), f, false, true)
+	iter := s.Iterator(key(10), key(30), f, false)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 	}
@@ -570,7 +584,7 @@ func TestScanBreakEarly(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	var keys []Key
-	iter := s.Iterator(key(0), key(100), f, false, true)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 		if len(keys) == 2 {
@@ -594,7 +608,7 @@ func TestScanEmptyValues(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	var vals []string
-	iter := s.Iterator(key(0), key(100), f, false, true)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		vals = append(vals, string(iter.Current().Value))
 	}
@@ -614,7 +628,7 @@ func TestScanLastEntry(t *testing.T) {
 	f := openSSTFile(t, dir, s)
 
 	var vals []string
-	iter := s.Iterator(key(20), key(100), f, false, true)
+	iter := s.Iterator(key(20), key(100), f, false)
 	for iter.Next() {
 		vals = append(vals, string(iter.Current().Value))
 	}
@@ -667,7 +681,7 @@ func TestScanYieldsTombstones(t *testing.T) {
 
 	var keys []Key
 	var tombstones []Key
-	iter := s.Iterator(key(0), key(100), f, false, true)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		keys = append(keys, iter.Current().Key)
 		if iter.Current().Value == nil {
@@ -741,7 +755,7 @@ func TestAllTombstones(t *testing.T) {
 	}
 
 	var tombstones []Key
-	iter := s.Iterator(key(0), key(100), f, false, true)
+	iter := s.Iterator(key(0), key(100), f, false)
 	for iter.Next() {
 		if iter.Current().Value != nil {
 			t.Errorf("Scan(%v): expected nil value for tombstone", iter.Current().Key)
@@ -818,12 +832,18 @@ func TestGetCorruptedKeyLenNoPanic(t *testing.T) {
 
 	data := buf.Bytes()
 
-	// Inject into an sst's block cache so Get uses it directly
+	// Inject the corrupt block into a fresh cache so GetBlock returns it
+	// directly without reading from disk. The cache stores manualNew'd
+	// C-heap memory, so we copy our test bytes there.
+	cache := newBlockCache(1 << 20)
 	s := &sst{
-		cache:  make(map[uint64]sstBlock),
 		blocks: []sstBlockIndex{{FirstKey: key(0), Offset: 0, Length: uint32(len(data))}},
+		hash:   sstHash{},
+		cache:  cache,
 	}
-	s.cache[0] = sstBlock{data: data}
+	cbuf := blockBufGet(len(data))
+	copy(cbuf, data)
+	cache.Put(blockKey{s.hash, 0}, cbuf).release()
 
 	// This must not panic — should return an error
 	defer func() {

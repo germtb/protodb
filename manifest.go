@@ -2,7 +2,6 @@ package protodb
 
 import (
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"hash/crc32"
 	"os"
@@ -46,7 +45,7 @@ const (
 )
 
 type LevelMetadata struct {
-	hash  string
+	hash  sstHash
 	first Key
 	last  Key
 }
@@ -124,7 +123,8 @@ func decodeEntries(data []byte, start, n int) ([]LevelMetadata, int, bool) {
 		if pos+hashSize+4 > len(data) {
 			return nil, 0, false
 		}
-		hash := hex.EncodeToString(data[pos : pos+hashSize])
+		var hash sstHash
+		copy(hash[:], data[pos:pos+hashSize])
 		pos += hashSize
 
 		firstLen := int(binary.BigEndian.Uint32(data[pos : pos+4]))
@@ -173,14 +173,7 @@ func (m *Manifest) Update(level byte, metadata []LevelMetadata) error {
 
 	pos := 9
 	for _, e := range metadata {
-		hash, err := hex.DecodeString(e.hash)
-		if err != nil {
-			return err
-		}
-		if len(hash) != hashSize {
-			return fmt.Errorf("manifest: hash %q is %d bytes, want %d", e.hash, len(hash), hashSize)
-		}
-		copy(data[pos:], hash)
+		copy(data[pos:], e.hash[:])
 		pos += hashSize
 
 		binary.BigEndian.PutUint32(data[pos:pos+4], uint32(len(e.first)))

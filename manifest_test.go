@@ -1,14 +1,25 @@
 package protodb
 
 import (
+	"encoding/hex"
 	"path/filepath"
 	"reflect"
 	"testing"
 )
 
-const hashA = "aabbccdd000000000000000000000000000000000000000000000000000000aa"
-const hashB = "11223344000000000000000000000000000000000000000000000000000000bb"
-const hashC = "deadbeef000000000000000000000000000000000000000000000000000000cc"
+func mustHash(s string) sstHash {
+	var h sstHash
+	if _, err := hex.Decode(h[:], []byte(s)); err != nil {
+		panic(err)
+	}
+	return h
+}
+
+var (
+	hashA = mustHash("aabbccdd000000000000000000000000000000000000000000000000000000aa")
+	hashB = mustHash("11223344000000000000000000000000000000000000000000000000000000bb")
+	hashC = mustHash("deadbeef000000000000000000000000000000000000000000000000000000cc")
+)
 
 func metaA() LevelMetadata { return LevelMetadata{hash: hashA, first: Key("aa"), last: Key("az")} }
 func metaB() LevelMetadata { return LevelMetadata{hash: hashB, first: Key("ba"), last: Key("bz")} }

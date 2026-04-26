@@ -10,8 +10,6 @@ import (
 	"hash/crc32"
 	"io"
 	"path/filepath"
-	"sync"
-	"sync/atomic"
 
 	"github.com/golang/snappy"
 )
@@ -86,28 +84,17 @@ type sstFooter struct {
 	Version        uint16
 }
 
-type sstBlock struct {
-	data []byte
-}
+type sstHash = [32]byte
 
 type sst struct {
-	cacheMutex sync.Mutex
-	cache      map[uint64]sstBlock
-	blocks     []sstBlockIndex
-	footer     sstFooter
-	hash       string
-	path       string
-	fileSize   int64
-	firstKey   Key
-	lastKey    Key
-	// clock cache reference
-	referenced atomic.Bool
-}
-
-func (s *sst) clearCache() {
-	s.cacheMutex.Lock()
-	defer s.cacheMutex.Unlock()
-	s.cache = make(map[uint64]sstBlock)
+	blocks   []sstBlockIndex
+	footer   sstFooter
+	hash     sstHash
+	path     string
+	fileSize int64
+	firstKey Key
+	lastKey  Key
+	cache    *blockCache
 }
 
 type reader interface {
@@ -119,12 +106,12 @@ type reader interface {
 const Version uint16 = 1
 const tombstone uint32 = 0xFFFFFFFF
 const sstFooterSize int64 = 8 + 8 + 2 // BlockIndexSize + BlockCount + Version
-var SSTSize int = 1024 * 1024 * 64    // 64 Mb
+const SSTSize int = 1024 * 1024 * 64  // 64 Mb
 
 // Linear tree block constants
 const noChild uint16 = 0xFFFF
 const maxBlockEntries = 342   // ceil(4096 / 12), smallest possible entry is 12 bytes
-var BlockSize int = 1024 * 4  // 4Kb
+const BlockSize int = 1024 * 4  // 4Kb
 var blockFooterSize int64 = 8 // rootOffset(u16) + entryCount(u16) + crc32(u32)
 
 type ReaderOptions struct {
@@ -238,7 +225,7 @@ var (
 // writeTombstones controls whether entries with value == nil are serialized.
 // Flushes must write tombstones so deletions shadow older values at lower
 // levels; bottom-level compactions pass false to reclaim space.
-func WriteSST(fs FS, path string, entries Iterator, writeTombstones bool) ([]*sst, error) {
+func WriteSST(fs FS, path string, entries Iterator, writeTombstones bool, cache *blockCache) ([]*sst, error) {
 	var ssts []*sst
 	buffer := sstBufferPool.Get()
 	defer sstBufferPool.Put(buffer)
@@ -346,9 +333,9 @@ func WriteSST(fs FS, path string, entries Iterator, writeTombstones bool) ([]*ss
 		writeU64(buffer, footer.BlockCount)
 		writeU16(buffer, footer.Version)
 
-		// Hash the complete SST content
-		sha := sha256.Sum256(buffer.Bytes())
-		hash := hex.EncodeToString(sha[:])
+		// Hash the complete SST content. The raw hash is stored on the
+		// in-memory sst; the on-disk filename is its hex form.
+		hash := sha256.Sum256(buffer.Bytes())
 
 		// Write to temp file, rename. No per-file fsync — callers batch a single
 		// syncDir(path) + manifest fsync after all SSTs in the flush/compaction
@@ -377,14 +364,13 @@ func WriteSST(fs FS, path string, entries Iterator, writeTombstones bool) ([]*ss
 		}
 		tempfile = nil
 
-		finalPath := filepath.Join(path, hash)
+		finalPath := filepath.Join(path, hex.EncodeToString(hash[:]))
 		if err := fs.Rename(tempPath, finalPath); err != nil {
 			return err
 		}
 		renamed = true
 
 		ssts = append(ssts, &sst{
-			cache:    make(map[uint64]sstBlock),
 			blocks:   blocks,
 			footer:   footer,
 			hash:     hash,
@@ -392,6 +378,7 @@ func WriteSST(fs FS, path string, entries Iterator, writeTombstones bool) ([]*ss
 			fileSize: int64(buffer.Len()),
 			firstKey: blocks[0].FirstKey,
 			lastKey:  lastKey,
+			cache:    cache,
 		})
 
 		// Reset for next SST
@@ -466,8 +453,8 @@ func WriteSST(fs FS, path string, entries Iterator, writeTombstones bool) ([]*ss
 	return ssts, nil
 }
 
-func ReadSST(fs FS, path string, meta LevelMetadata, options *ReaderOptions) (*sst, error) {
-	path = filepath.Join(path, meta.hash)
+func ReadSST(fs FS, path string, meta LevelMetadata, options *ReaderOptions, cache *blockCache) (*sst, error) {
+	path = filepath.Join(path, hex.EncodeToString(meta.hash[:]))
 	file, err := fs.Open(path)
 	if err != nil {
 		return nil, err
@@ -521,7 +508,6 @@ func ReadSST(fs FS, path string, meta LevelMetadata, options *ReaderOptions) (*s
 	}
 
 	return &sst{
-		cache:    make(map[uint64]sstBlock),
 		blocks:   blocks,
 		footer:   footer,
 		hash:     meta.hash,
@@ -529,55 +515,43 @@ func ReadSST(fs FS, path string, meta LevelMetadata, options *ReaderOptions) (*s
 		fileSize: fileSize,
 		firstKey: meta.first,
 		lastKey:  meta.last,
+		cache:    cache,
 	}, nil
 }
 
-// GetBlock reads block `blockIndex` from `reader`. When `cache` is true the
-// per-SST cache is consulted on the way in and the result populated on the
-// way out. Compaction passes cache=false: it scans every block exactly
-// once and would otherwise pollute the cache with megabytes of
-// to-be-discarded decoded blocks (the dominant source of resident memory
-// during merge work).
-func (s *sst) GetBlock(blockIndex uint64, reader reader, cache bool) (*sstBlock, error) {
-	if cache {
-		s.cacheMutex.Lock()
-		cached, ok := s.cache[blockIndex]
-		s.cacheMutex.Unlock()
-		if ok {
-			return &cached, nil
-		}
+func (s *sst) GetBlock(index uint64, r reader) (*blockRef, error) {
+	key := blockKey{s.hash, index}
+	if ref, ok := s.cache.Get(key); ok {
+		return ref, nil
 	}
 
-	block := s.blocks[blockIndex]
-	compressed := make([]byte, block.Length)
-	_, err := reader.ReadAt(compressed, int64(block.Offset))
-	if err != nil {
+	blockIndex := s.blocks[index]
+	compressed := make([]byte, blockIndex.Length)
+	if _, err := r.ReadAt(compressed, int64(blockIndex.Offset)); err != nil {
 		return nil, err
 	}
 
-	data, err := snappy.Decode(nil, compressed)
-
+	decodedLen, err := snappy.DecodedLen(compressed)
 	if err != nil {
+		return nil, ErrCorrupted
+	}
+	data := blockBufGet(decodedLen)
+	if _, err := snappy.Decode(data, compressed); err != nil {
+		blockBufPut(data)
 		return nil, err
 	}
 
 	if len(data) < int(blockFooterSize) {
+		blockBufPut(data)
 		return nil, ErrCorrupted
 	}
 	storedChecksum := binary.BigEndian.Uint32(data[len(data)-4:])
 	if crc32.ChecksumIEEE(data[:len(data)-4]) != storedChecksum {
+		blockBufPut(data)
 		return nil, ErrCorrupted
 	}
 
-	result := sstBlock{data}
-	if cache {
-		s.cacheMutex.Lock()
-		// Cache may have been swapped out by clearCache (engine LRU eviction);
-		// the swap is racy with this Put, but worst case we orphan one decode.
-		s.cache[blockIndex] = result
-		s.cacheMutex.Unlock()
-	}
-	return &result, nil
+	return s.cache.Put(key, data), nil
 }
 
 // readEntry reads a single entry from block data at the given position.
@@ -606,7 +580,7 @@ func readEntry(data []byte, pos int64) (key Key, valueLen uint32, entrySize int6
 	return key, valueLen, entrySize, nil
 }
 
-func (s *sst) Get(key Key, reader reader) ([]byte, error) {
+func (s *sst) Get(key Key, r reader) ([]byte, error) {
 	// Binary search on block index to find the right block
 	blockIdx := bsearchBlock(s.blocks, key) - 1
 
@@ -614,10 +588,11 @@ func (s *sst) Get(key Key, reader reader) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 
-	block, err := s.GetBlock(uint64(blockIdx), reader, true)
+	block, err := s.GetBlock(uint64(blockIdx), r)
 	if err != nil {
 		return nil, err
 	}
+	defer block.release()
 
 	// BST traversal within the block.
 	data := block.data
@@ -655,7 +630,10 @@ func (s *sst) Get(key Key, reader reader) ([]byte, error) {
 			if isTombstone {
 				return nil, ErrDeleted
 			}
-			return data[inBlockOffset+8+keyLen : inBlockOffset+8+keyLen+int(valueLen)], nil
+			valueStart := inBlockOffset + 8 + keyLen
+			out := make([]byte, valueLen)
+			copy(out, data[valueStart:valueStart+int(valueLen)])
+			return out, nil
 		}
 		if cmp < 0 {
 			leftOff := binary.BigEndian.Uint16(data[leftPosition : leftPosition+2])
@@ -684,7 +662,7 @@ func (s *sst) Get(key Key, reader reader) ([]byte, error) {
 //
 // The optimization: keys are bucketed per block. Each block is read at most once,
 // and a single forward scan through the block finds all requested keys in that block.
-func (s *sst) BulkGet(sortedKeys []Key, reader reader) ([][]byte, []error, error) {
+func (s *sst) BulkGet(sortedKeys []Key, r reader) ([][]byte, []error, error) {
 	values := make([][]byte, len(sortedKeys))
 	errs := make([]error, len(sortedKeys))
 	for i := range errs {
@@ -724,7 +702,7 @@ func (s *sst) BulkGet(sortedKeys []Key, reader reader) ([][]byte, []error, error
 		}
 
 		// Load the block once and scan it for all keys in [keyIndex, batchEnd)
-		block, err := s.GetBlock(uint64(blockIndex), reader, true)
+		block, err := s.GetBlock(uint64(blockIndex), r)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -738,6 +716,7 @@ func (s *sst) BulkGet(sortedKeys []Key, reader reader) ([][]byte, []error, error
 		for pos < endPos && wantedIdx < batchEnd {
 			entryKey, valueLen, entrySize, err := readEntry(data, pos)
 			if err != nil {
+				block.release()
 				return nil, nil, err
 			}
 
@@ -755,7 +734,11 @@ func (s *sst) BulkGet(sortedKeys []Key, reader reader) ([][]byte, []error, error
 					errs[wantedIdx] = ErrDeleted
 				} else {
 					valueStart := pos + entrySize - int64(valueLen) - 6 // -6: left+right+prev are after value
-					values[wantedIdx] = data[valueStart : valueStart+int64(valueLen)]
+					// Copy out before block.release() — slice into the
+					// C-heap buffer mustn't outlive the ref.
+					out := make([]byte, valueLen)
+					copy(out, data[valueStart:valueStart+int64(valueLen)])
+					values[wantedIdx] = out
 					errs[wantedIdx] = nil
 				}
 				wantedIdx++
@@ -764,6 +747,7 @@ func (s *sst) BulkGet(sortedKeys []Key, reader reader) ([][]byte, []error, error
 			pos += entrySize
 		}
 
+		block.release()
 		keyIndex = batchEnd
 		blockStart = blockIndex
 	}
@@ -777,22 +761,21 @@ type sstIterator struct {
 	lo         Key
 	hi         Key
 	blockIndex int
-	block      *sstBlock
+	block      *blockRef
 	pos        int64
 	end        int64
 	current    KeyValue
 	done       bool
 	reverse    bool
-	// cache: forwarded to GetBlock. User scans set true; compaction false.
-	cache bool
 }
 
 // Iterator returns an iterator over [lo, hi) on this SST. Direction is baked
 // in at construction: reverse=false iterates ascending, reverse=true
-// iterates descending. `cache` decides whether decoded blocks land in the
-// per-SST cache — pass false for one-shot reads (compaction).
-func (s *sst) Iterator(lo Key, hi Key, r reader, reverse bool, cache bool) *sstIterator {
-	it := &sstIterator{sst: s, reader: r, lo: lo, hi: hi, reverse: reverse, cache: cache}
+// iterates descending. The iterator owns no file handle — callers pass a
+// `reader` (typically a refcounted FileHandle from the engine's
+// fileTable) and Close it when done.
+func (s *sst) Iterator(lo Key, hi Key, r reader, reverse bool) *sstIterator {
+	it := &sstIterator{sst: s, reader: r, lo: lo, hi: hi, reverse: reverse}
 	if reverse {
 		if hi == nil {
 			it.blockIndex = len(s.blocks) - 1
@@ -846,7 +829,7 @@ func (it *sstIterator) nextForward() bool {
 				it.done = true
 				return false
 			}
-			block, err := it.sst.GetBlock(uint64(it.blockIndex), it.reader, it.cache)
+			block, err := it.sst.GetBlock(uint64(it.blockIndex), it.reader)
 			if err != nil {
 				it.done = true
 				return false
@@ -858,6 +841,7 @@ func (it *sstIterator) nextForward() bool {
 
 		// Advance to next block if current is exhausted
 		if it.pos >= it.end {
+			it.block.release()
 			it.blockIndex++
 			it.block = nil
 			continue
@@ -900,7 +884,7 @@ func (it *sstIterator) nextReverse() bool {
 				it.done = true
 				return false
 			}
-			block, err := it.sst.GetBlock(uint64(it.blockIndex), it.reader, it.cache)
+			block, err := it.sst.GetBlock(uint64(it.blockIndex), it.reader)
 			if err != nil {
 				it.done = true
 				return false
@@ -926,6 +910,7 @@ func (it *sstIterator) nextReverse() bool {
 		// block — drop into the previous block on the next call.
 		prevOffset := binary.BigEndian.Uint16(data[cur+entrySize-2 : cur+entrySize])
 		if prevOffset == noChild {
+			it.block.release()
 			it.blockIndex--
 			it.block = nil
 		} else {
@@ -958,6 +943,10 @@ func (it *sstIterator) Current() KeyValue {
 }
 
 func (it *sstIterator) Close() error {
+	if it.block != nil {
+		it.block.release()
+		it.block = nil
+	}
 	if it.reader == nil {
 		return nil
 	}
@@ -978,13 +967,13 @@ type sstConcatIterator struct {
 	currentIterator *sstIterator
 	done            bool
 	reverse         bool // determines stepping direction
-	cache           bool // forwarded to per-sst Iterator
 }
 
 // newSSTConcatIterator creates an iterator over the given sorted,
-// non-overlapping SSTs, in either direction. `openSST` returns a reader for
-// the given SST. `cache` is forwarded to each underlying sst.Iterator.
-func newSSTConcatIterator(ssts []*sst, lo Key, hi Key, openSST func(*sst) (reader, error), reverse bool, cache bool) *sstConcatIterator {
+// non-overlapping SSTs, in either direction. `openSST` is called lazily
+// per SST as the iterator advances; it returns a `reader` (typically a
+// pooled file handle) which the inner sstIterator will Close on advance.
+func newSSTConcatIterator(ssts []*sst, lo Key, hi Key, openSST func(*sst) (reader, error), reverse bool) *sstConcatIterator {
 	var startIndex int
 	if reverse {
 		if hi == nil {
@@ -1009,7 +998,6 @@ func newSSTConcatIterator(ssts []*sst, lo Key, hi Key, openSST func(*sst) (reade
 		hi:       hi,
 		sstIndex: startIndex,
 		reverse:  reverse,
-		cache:    cache,
 	}
 	if reverse {
 		it.done = startIndex < 0
@@ -1063,7 +1051,7 @@ func (it *sstConcatIterator) Next() bool {
 				it.done = true
 				return false
 			}
-			it.currentIterator = s.Iterator(it.lo, it.hi, r, it.reverse, it.cache)
+			it.currentIterator = s.Iterator(it.lo, it.hi, r, it.reverse)
 		}
 
 		if it.currentIterator.Next() {

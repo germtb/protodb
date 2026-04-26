@@ -134,6 +134,7 @@ func (p *PebbleFS) Stat(name string) (protodb.FileInfo, error) {
 	return info, nil
 }
 
+
 // appendFile wraps a Pebble read/write File to provide append-at-offset
 // semantics. It uses WriteAt against a locally-tracked tail offset since
 // vfs.File has no Seek.

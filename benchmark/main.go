@@ -55,10 +55,9 @@ import (
 // pass sync=true for measured ops.
 type DB interface {
 	Put(key, value []byte, sync bool) error
-	// BulkPutNoSync writes a batch of entries in one transaction with
-	// no fsync. Used only by populate; avoids the per-Put overhead
-	// (especially per-tx fsync that Bolt insists on otherwise).
-	BulkPutNoSync(entries []entry) error
+	// BulkPut writes a batch of entries in one transaction. Used by
+	// populate (sync=false) and the BatchedWrites benchmark (sync=true).
+	BulkPut(entries []entry, sync bool) error
 	Get(key []byte) ([]byte, error)
 	Delete(key []byte, sync bool) error
 	Scan(lo, hi []byte) Iterator
@@ -76,15 +75,12 @@ type Iterator interface {
 
 type lsmDB struct{ eng *protodb.Engine }
 
-// benchSSTCacheSlots controls the engine's CLOCK cache capacity for
-// benchmarks. With SSTSize=64MB, this gives a 128MB ceiling on cached
-// decoded blocks — well below the 500MB Loaded/* working set so the
-// benchmark exercises real eviction. Matches the Pebble cache budget
-// configured in openPebble.
-const benchSSTCacheSlots = 2
+// benchLSMBlockCacheBytes matches Pebble's cache below so the comparison
+// is symmetric: both engines hold up to 128 MB of decoded block content.
+const benchLSMBlockCacheBytes int64 = 128 << 20
 
 func openLSM(dir string) (DB, error) {
-	eng, err := protodb.Open(dir, protodb.WithSSTCacheSize(benchSSTCacheSlots))
+	eng, err := protodb.Open(dir, protodb.WithBlockCacheSize(benchLSMBlockCacheBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -96,8 +92,8 @@ func (d *lsmDB) Put(k, v []byte, sync bool) error {
 	return d.eng.Put(k, v)
 }
 
-func (d *lsmDB) BulkPutNoSync(entries []entry) error {
-	d.setSync(false)
+func (d *lsmDB) BulkPut(entries []entry, sync bool) error {
+	d.setSync(sync)
 	tx := d.eng.Transaction()
 	for _, e := range entries {
 		tx.Put(e.key, e.value)
@@ -177,7 +173,7 @@ func writeOpts(sync bool) *pebble.WriteOptions {
 
 func (d *pebbleDB) Put(k, v []byte, sync bool) error { return d.db.Set(k, v, writeOpts(sync)) }
 
-func (d *pebbleDB) BulkPutNoSync(entries []entry) error {
+func (d *pebbleDB) BulkPut(entries []entry, sync bool) error {
 	batch := d.db.NewBatch()
 	for _, e := range entries {
 		if err := batch.Set(e.key, e.value, nil); err != nil {
@@ -185,7 +181,7 @@ func (d *pebbleDB) BulkPutNoSync(entries []entry) error {
 			return err
 		}
 	}
-	return batch.Commit(pebble.NoSync)
+	return batch.Commit(writeOpts(sync))
 }
 
 func (d *pebbleDB) Get(k []byte) ([]byte, error) {
@@ -292,8 +288,8 @@ func (d *sqliteDB) Put(k, v []byte, sync bool) error {
 	return err
 }
 
-func (d *sqliteDB) BulkPutNoSync(entries []entry) error {
-	d.setSync(false)
+func (d *sqliteDB) BulkPut(entries []entry, sync bool) error {
+	d.setSync(sync)
 	tx, err := d.db.Begin()
 	if err != nil {
 		return err
@@ -403,8 +399,8 @@ func (d *boltDB) Put(k, v []byte, sync bool) error {
 	})
 }
 
-func (d *boltDB) BulkPutNoSync(entries []entry) error {
-	d.db.NoSync = true
+func (d *boltDB) BulkPut(entries []entry, sync bool) error {
+	d.db.NoSync = !sync
 	return d.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(boltBucket)
 		for _, e := range entries {
@@ -539,9 +535,9 @@ func genReadIndices(n, populateSize int, seed uint64) []int {
 	return out
 }
 
-// populate writes entries in chunks via BulkPutNoSync. ~30× faster than
-// per-Put with autocommit on SQLite/Bolt; meaningfully faster on LSM/Pebble
-// too because of batched WAL writes.
+// populate writes entries in chunks via BulkPut(sync=false). ~30× faster
+// than per-Put with autocommit on SQLite/Bolt; meaningfully faster on
+// LSM/Pebble too because of batched WAL writes.
 func populate(db DB, entries []entry) error {
 	const chunk = 10_000
 	for start := 0; start < len(entries); start += chunk {
@@ -549,7 +545,7 @@ func populate(db DB, entries []entry) error {
 		if end > len(entries) {
 			end = len(entries)
 		}
-		if err := db.BulkPutNoSync(entries[start:end]); err != nil {
+		if err := db.BulkPut(entries[start:end], false); err != nil {
 			return err
 		}
 	}
@@ -773,46 +769,79 @@ func concurrentReaders(n int) BenchFunc {
 	}
 }
 
-// concurrentReadWrites spawns w writer + r reader goroutines for the
-// budget, returns reader op count (writers are the load, readers are the
-// measurement).
-func concurrentReadWrites(writers, readers int) BenchFunc {
+// concurrentReadWrites spawns n goroutines each running a 50/50 Get/Put
+// stream against the populated keyspace (writes overwrite existing keys).
+// Reported ns/op is total time divided by total ops (reads + writes), so
+// it's a true blended latency rather than a read-dominated average.
+func concurrentReadWrites(n int) BenchFunc {
+	return concurrentMixedStream(n, populateSize, false)
+}
+
+func loadedConcurrentReadWrites(n int) BenchFunc {
+	return concurrentMixedStream(n, loadedSize, true)
+}
+
+func concurrentMixedStream(n, size int, preloaded bool) BenchFunc {
 	return func(db DB, budget time.Duration) (int, error) {
-		w := genWorkload(populateSize, dataSeed)
-		if err := populate(db, w); err != nil {
-			return 0, err
+		w := genWorkload(size, dataSeed)
+		if !preloaded {
+			if err := populate(db, w); err != nil {
+				return 0, err
+			}
 		}
-		idx := genReadIndices(100_000, populateSize, indexSeed)
+		idx := genReadIndices(100_000, size, indexSeed)
 		stop := make(chan struct{})
 		time.AfterFunc(budget, func() { close(stop) })
 
-		var wwg sync.WaitGroup
-		for wi := 0; wi < writers; wi++ {
-			wwg.Add(1)
-			go func(base int) {
-				defer wwg.Done()
+		var total atomic.Int64
+		var wg sync.WaitGroup
+		for g := 0; g < n; g++ {
+			wg.Add(1)
+			go func(seed uint64) {
+				defer wg.Done()
+				rng := mathrand.New(mathrand.NewPCG(seed, seed+1))
 				i := 0
 				for {
 					select {
 					case <-stop:
 						return
 					default:
-						k := uint64Key(uint64(populateSize + base + i*writers))
-						if err := db.Put(k, w[i%len(w)].value, true); err != nil {
-							return
+						k := uint64Key(uint64(idx[i%len(idx)]))
+						if rng.IntN(2) == 0 {
+							if _, err := db.Get(k); err != nil {
+								return
+							}
+						} else {
+							if err := db.Put(k, w[i%len(w)].value, true); err != nil {
+								return
+							}
 						}
 						i++
+						total.Add(1)
 					}
 				}
-			}(wi)
+			}(uint64(g))
 		}
+		wg.Wait()
+		return int(total.Load()), nil
+	}
+}
 
-		var reads atomic.Int64
-		var rwg sync.WaitGroup
-		for ri := 0; ri < readers; ri++ {
-			rwg.Add(1)
+// loadedConcurrentReaders is concurrentReaders against the pre-populated
+// loaded dataset (cache-resident assumption broken — working set exceeds
+// the block cache, so this measures cold-ish reads under contention).
+func loadedConcurrentReaders(n int) BenchFunc {
+	return func(db DB, budget time.Duration) (int, error) {
+		idx := genReadIndices(100_000, loadedSize, indexSeed)
+		stop := make(chan struct{})
+		time.AfterFunc(budget, func() { close(stop) })
+
+		var total atomic.Int64
+		var wg sync.WaitGroup
+		for r := 0; r < n; r++ {
+			wg.Add(1)
 			go func(off int) {
-				defer rwg.Done()
+				defer wg.Done()
 				i := 0
 				for {
 					select {
@@ -824,14 +853,42 @@ func concurrentReadWrites(writers, readers int) BenchFunc {
 							return
 						}
 						i++
-						reads.Add(1)
+						total.Add(1)
 					}
 				}
-			}(ri * len(idx) / readers)
+			}(r * len(idx) / n)
 		}
-		rwg.Wait()
-		wwg.Wait()
-		return int(reads.Load()), nil
+		wg.Wait()
+		return int(total.Load()), nil
+	}
+}
+
+// benchBatchedWrites commits batches of `batchSize` entries in a single
+// transaction with sync=true. The reported ns/op is per-entry, so dividing
+// by avg value size gives MB/s. Larger batchSize amortizes the fsync cost;
+// throughput should grow until disk bandwidth caps it.
+func benchBatchedWrites(batchSize int) BenchFunc {
+	return func(db DB, budget time.Duration) (int, error) {
+		w := genWorkload(batchSize, dataSeed)
+		stop := make(chan struct{})
+		time.AfterFunc(budget, func() { close(stop) })
+		entries := 0
+		offset := uint64(0)
+		for {
+			select {
+			case <-stop:
+				return entries, nil
+			default:
+				for i := range w {
+					w[i].key = uint64Key(offset + uint64(i))
+				}
+				if err := db.BulkPut(w, true); err != nil {
+					return entries, err
+				}
+				entries += batchSize
+				offset += uint64(batchSize)
+			}
+		}
 	}
 }
 
@@ -873,8 +930,14 @@ func benchCompaction(n int) BenchFunc {
 // even 5% Puts add a ~150µs floor per op on average; pushing writes
 // higher just makes this a fsync benchmark. If you want a write-heavy
 // trace, run BenchmarkSustainedWrites or ConcurrentWrites instead.
+//
+// mixedPopulateSize is intentionally larger than the default populateSize
+// so the working set exceeds the 128 MB block cache — otherwise every Get
+// would be a cache hit on a bench-tuned engine, and the test would only
+// measure Put/Delete/Scan latency.
 func benchMixedWorkload(db DB, budget time.Duration) (int, error) {
-	w := genWorkload(populateSize, dataSeed)
+	const mixedPopulateSize = 200_000 // ~200 MB at avg 1 KB value, exceeds 128 MB cache
+	w := genWorkload(mixedPopulateSize, dataSeed)
 	if err := populate(db, w); err != nil {
 		return 0, err
 	}
@@ -889,7 +952,7 @@ func benchMixedWorkload(db DB, budget time.Duration) (int, error) {
 	script := make([]op, scriptSize)
 	for i := range script {
 		r := rng.IntN(100)
-		key := uint64(rng.IntN(populateSize * 2))
+		key := uint64(rng.IntN(mixedPopulateSize * 2))
 		switch {
 		case r < 90:
 			script[i] = op{kind: 'g', key: key}
@@ -940,6 +1003,17 @@ func benches() []Bench {
 		Bench{Name: "Scan", Run: benchScan},
 		Bench{Name: "ReverseScan", Run: benchReverseScan},
 		Bench{Name: "SustainedWrites", Backends: []string{"LSM", "Pebble"}, Run: benchSustainedWrites},
+	)
+
+	for _, n := range []int{1, 10, 100, 1000, 10000} {
+		out = append(out, Bench{
+			Name:     fmt.Sprintf("BatchedWrites/%d", n),
+			Backends: []string{"LSM", "Pebble", "SQLite", "Bolt"},
+			Run:      benchBatchedWrites(n),
+		})
+	}
+
+	out = append(out,
 		Bench{Name: "MixedWorkload", Backends: []string{"LSM", "Pebble"}, Run: benchMixedWorkload},
 	)
 
@@ -957,14 +1031,12 @@ func benches() []Bench {
 			Run:      concurrentReaders(n),
 		})
 	}
-	for _, w := range []int{1, 2, 4} {
-		for _, r := range []int{1, 2, 4, 8} {
-			out = append(out, Bench{
-				Name:     fmt.Sprintf("ConcurrentReadWrites/%dw_%dr", w, r),
-				Backends: []string{"LSM", "Pebble"},
-				Run:      concurrentReadWrites(w, r),
-			})
-		}
+	for _, n := range []int{2, 4, 8, 16} {
+		out = append(out, Bench{
+			Name:     fmt.Sprintf("ConcurrentReadWrites/%dg", n),
+			Backends: []string{"LSM", "Pebble"},
+			Run:      concurrentReadWrites(n),
+		})
 	}
 	for _, n := range []int{10, 100, 1000, 10000} {
 		out = append(out, Bench{
@@ -985,6 +1057,22 @@ func benches() []Bench {
 		Bench{Name: "Loaded/Scan", CacheKey: loadedCacheKey, Run: loadedBenchScan},
 		Bench{Name: "Loaded/ReverseScan", CacheKey: loadedCacheKey, Run: loadedBenchReverseScan},
 	)
+	for _, n := range []int{1, 2, 4, 8, 16} {
+		out = append(out, Bench{
+			Name:     fmt.Sprintf("Loaded/ConcurrentReads/%dr", n),
+			Backends: []string{"LSM", "Pebble"},
+			CacheKey: loadedCacheKey,
+			Run:      loadedConcurrentReaders(n),
+		})
+	}
+	for _, n := range []int{2, 4, 8, 16} {
+		out = append(out, Bench{
+			Name:     fmt.Sprintf("Loaded/ConcurrentReadWrites/%dg", n),
+			Backends: []string{"LSM", "Pebble"},
+			CacheKey: loadedCacheKey,
+			Run:      loadedConcurrentReadWrites(n),
+		})
+	}
 
 	return out
 }
@@ -1185,20 +1273,22 @@ func nsPerOp(r Result) float64 {
 
 // formatCell builds the per-backend cell. Format:
 //
-//	`<time>  <ratio>x  <heap>`  (non-baseline, baseline measured)
-//	`<time>  <heap>`            (baseline)
-//	`-`                         (no result)
+//	`<time>  <ratio>x  <peak>/<live>`  (non-baseline, baseline measured)
+//	`<time>  <peak>/<live>`            (baseline)
+//	`-`                                 (no result)
 //
 // ratio is baseline_ns / this_ns, so ratio>1 means "this backend is faster
-// than baseline". Heap is the peak HeapInuse during the run — total
-// process resident, which conflates the engine with everything else, but
-// it's the same baseline for every backend so deltas are meaningful.
+// than baseline". `peak` is the max HeapInuse seen during the run (catches
+// GC-pending memory + live); `live` is HeapInuse after a forced GC at end
+// of run, approximating actually-resident bytes. A large peak/live ratio
+// means the engine is allocation-heavy but the steady-state footprint is
+// small.
 func formatCell(r Result, base Result, isBaseline bool) string {
 	if r.Err != nil || r.Ops == 0 {
 		return "-"
 	}
 	this := nsPerOp(r)
-	heap := fmtBytes(r.PeakHeap)
+	heap := fmt.Sprintf("%s/%s", fmtBytes(r.PeakHeap), fmtBytes(r.LiveHeap))
 	if isBaseline {
 		return fmt.Sprintf("%s  %s", fmtNs(this), heap)
 	}
@@ -1364,10 +1454,18 @@ func splitCSV(s string) []string {
 func runBench(args []string) {
 	fs := flag.NewFlagSet("bench", flag.ExitOnError)
 	filter := fs.String("bench", "", "regex filter on bench names (default: run all)")
+	backendFilter := fs.String("backends", "", "comma-separated backends to run (default: all)")
 	budget := fs.Duration("budget", 1*time.Second, "wall budget per bench × backend")
 	baseline := fs.String("baseline", "Pebble", "backend used as ratio baseline")
 	bold := fs.Bool("bold", true, "highlight winner in bold (auto-disabled when stdout is not a tty)")
 	fs.Parse(args)
+
+	// Optional per-backend filter — useful when measuring per-backend RSS,
+	// since multiple backends in one process pollute each other's metrics.
+	allowedBackends := backendOrder
+	if *backendFilter != "" {
+		allowedBackends = splitCSV(*backendFilter)
+	}
 
 	var pattern *regexp.Regexp
 	if *filter != "" {
@@ -1408,7 +1506,7 @@ func runBench(args []string) {
 	useBold := *bold && isTTY()
 
 	// Header. Each cell shows time / ratio / peak heap together.
-	header := fmt.Sprintf("budget=%s baseline=%s  (cell: time  ratio  peak heap)\n\n", *budget, *baseline)
+	header := fmt.Sprintf("budget=%s baseline=%s  (cell: time  ratio  peak/live heap)\n\n", *budget, *baseline)
 	fmt.Print(header)
 	fmt.Printf("%-*s", opW, "operation")
 	for _, b := range backendOrder {
@@ -1424,6 +1522,11 @@ func runBench(args []string) {
 	}
 	fmt.Println()
 
+	allowedSet := make(map[string]bool, len(allowedBackends))
+	for _, b := range allowedBackends {
+		allowedSet[b] = true
+	}
+
 	for _, bench := range bs {
 		applicable := bench.Backends
 		if len(applicable) == 0 {
@@ -1431,6 +1534,9 @@ func runBench(args []string) {
 		}
 		results := make(map[string]Result)
 		for _, backend := range applicable {
+			if !allowedSet[backend] {
+				continue
+			}
 			r := runOne(bench, backend, *budget)
 			results[backend] = r
 			if r.Err != nil {
