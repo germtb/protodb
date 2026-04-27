@@ -126,7 +126,7 @@ func (ft *FileTable) maybeEvict() {
 		// We decide to skip this error so that we can remove as many entries as possible
 		err := ft.evict(handle)
 
-		if err != nil {
+		if err == nil {
 			spillover -= 1
 		}
 	}
