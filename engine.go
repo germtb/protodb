@@ -553,7 +553,11 @@ func (e *Engine) scanImpl(lo Key, hi Key, reverse bool) Iterator {
 	var sources []Iterator
 
 	if activeMemtable != nil && activeMemtable.Len() > 0 {
-		sources = append(sources, activeMemtable.Scan(lo, hi, seqnum))
+		if reverse {
+			sources = append(sources, activeMemtable.ReverseScan(lo, hi, seqnum))
+		} else {
+			sources = append(sources, activeMemtable.Scan(lo, hi, seqnum))
+		}
 	}
 
 	scanIter := e.scan(lo, hi, nil, l0ssts, l1ssts, reverse)

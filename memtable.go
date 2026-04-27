@@ -34,6 +34,10 @@ func (m *memtable) Scan(lo, hi Key, snapshotSeq uint64) *skiplistIterator {
 	return m.list.Scan(lo, hi, snapshotSeq)
 }
 
+func (m *memtable) ReverseScan(lo, hi Key, snapshotSeq uint64) *skiplistIterator {
+	return m.list.ReverseScan(lo, hi, snapshotSeq)
+}
+
 func (m *memtable) Entries() *skiplistIterator {
 	return m.list.Entries()
 }

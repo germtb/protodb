@@ -516,6 +516,48 @@ func TestEngineScanMultipleSSTs(t *testing.T) {
 	}
 }
 
+// --- ReverseScan ---
+
+func TestEngineReverseScanMemtableOnly(t *testing.T) {
+	engine := openTestEngine(t)
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(3), []byte("c"))
+
+	keys, vals := scanLive(engine.ReverseScan(key(1), key(4)))
+
+	if len(keys) != 3 {
+		t.Fatalf("ReverseScan: got %d entries, want 3", len(keys))
+	}
+	if !bytes.Equal(keys[0], key(3)) || !bytes.Equal(keys[1], key(2)) || !bytes.Equal(keys[2], key(1)) {
+		t.Errorf("ReverseScan keys: got %v, want [3 2 1]", keys)
+	}
+	if string(vals[0]) != "c" || string(vals[1]) != "b" || string(vals[2]) != "a" {
+		t.Errorf("ReverseScan values: got %v, want [c b a]", vals)
+	}
+}
+
+func TestEngineReverseScanAcrossFlush(t *testing.T) {
+	engine := openTestEngine(t)
+	engine.Put(key(1), []byte("a"))
+	engine.Put(key(3), []byte("c"))
+	engine.Flush()
+	engine.Put(key(2), []byte("b"))
+	engine.Put(key(4), []byte("d"))
+
+	keys, vals := scanLive(engine.ReverseScan(key(1), key(5)))
+
+	if len(keys) != 4 {
+		t.Fatalf("ReverseScan across flush: got %d entries, want 4", len(keys))
+	}
+	if !bytes.Equal(keys[0], key(4)) || !bytes.Equal(keys[1], key(3)) || !bytes.Equal(keys[2], key(2)) || !bytes.Equal(keys[3], key(1)) {
+		t.Errorf("ReverseScan keys: got %v, want [4 3 2 1]", keys)
+	}
+	if string(vals[0]) != "d" || string(vals[1]) != "c" || string(vals[2]) != "b" || string(vals[3]) != "a" {
+		t.Errorf("ReverseScan values: got %v, want [d c b a]", vals)
+	}
+}
+
 // --- Persistence ---
 
 func TestEnginePersistenceMultipleFlushes(t *testing.T) {

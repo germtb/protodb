@@ -1,1 +1,1 @@
-Simple key database backed by sqlite
+Simple and fast LSM engine
