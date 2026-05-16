@@ -444,6 +444,10 @@ func WriteSST(fs FS, path string, entries Iterator, writeTombstones bool, cache 
 		inBlockEntries += 1
 	}
 
+	if err := entries.Err(); err != nil {
+		return nil, err
+	}
+
 	if inBlockEntries > 0 || len(blocks) > 0 {
 		if err := finishSST(); err != nil {
 			return nil, err
@@ -767,6 +771,7 @@ type sstIterator struct {
 	current    KeyValue
 	done       bool
 	reverse    bool
+	err        error
 }
 
 // Iterator returns an iterator over [lo, hi) on this SST. Direction is baked
@@ -831,6 +836,7 @@ func (it *sstIterator) nextForward() bool {
 			}
 			block, err := it.sst.GetBlock(uint64(it.blockIndex), it.reader)
 			if err != nil {
+				it.err = err
 				it.done = true
 				return false
 			}
@@ -850,6 +856,7 @@ func (it *sstIterator) nextForward() bool {
 		data := it.block.data
 		entryKey, valueLen, entrySize, err := readEntry(data, it.pos)
 		if err != nil {
+			it.err = err
 			it.done = true
 			return false
 		}
@@ -886,12 +893,14 @@ func (it *sstIterator) nextReverse() bool {
 			}
 			block, err := it.sst.GetBlock(uint64(it.blockIndex), it.reader)
 			if err != nil {
+				it.err = err
 				it.done = true
 				return false
 			}
 			it.block = block
 			it.pos, err = findLastEntryOffset(block.data)
 			if err != nil {
+				it.err = err
 				it.done = true
 				return false
 			}
@@ -901,6 +910,7 @@ func (it *sstIterator) nextReverse() bool {
 		cur := it.pos
 		entryKey, valueLen, entrySize, err := readEntry(data, cur)
 		if err != nil {
+			it.err = err
 			it.done = true
 			return false
 		}
@@ -942,6 +952,10 @@ func (it *sstIterator) Current() KeyValue {
 	return it.current
 }
 
+func (it *sstIterator) Err() error {
+	return it.err
+}
+
 func (it *sstIterator) Close() error {
 	if it.block != nil {
 		it.block.release()
@@ -967,6 +981,7 @@ type sstConcatIterator struct {
 	currentIterator *sstIterator
 	done            bool
 	reverse         bool // determines stepping direction
+	err             error
 }
 
 // newSSTConcatIterator creates an iterator over the given sorted,
@@ -1048,6 +1063,7 @@ func (it *sstConcatIterator) Next() bool {
 			}
 			r, err := it.openSST(s)
 			if err != nil {
+				it.err = err
 				it.done = true
 				return false
 			}
@@ -1058,8 +1074,14 @@ func (it *sstConcatIterator) Next() bool {
 			return true
 		}
 
-		// Current SST exhausted in this direction; move to next/prev SST.
-		// TODO: capture iterator close error.
+		if err := it.currentIterator.Err(); err != nil {
+			it.err = err
+			it.done = true
+			_ = it.currentIterator.Close()
+			it.currentIterator = nil
+			return false
+		}
+
 		_ = it.currentIterator.Close()
 		it.currentIterator = nil
 		if it.reverse {
@@ -1073,6 +1095,10 @@ func (it *sstConcatIterator) Next() bool {
 
 func (it *sstConcatIterator) Current() KeyValue {
 	return it.currentIterator.current
+}
+
+func (it *sstConcatIterator) Err() error {
+	return it.err
 }
 
 func (it *sstConcatIterator) Close() error {

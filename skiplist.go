@@ -272,6 +272,8 @@ func (it *skiplistIterator) Current() KeyValue {
 	return it.entries[it.idx]
 }
 
+func (it *skiplistIterator) Err() error { return nil }
+
 func (it *skiplistIterator) Close() error {
 	return nil
 }

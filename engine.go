@@ -470,6 +470,7 @@ type mergeIterator struct {
 	current KeyValue
 	started bool
 	sources []Iterator
+	err     error
 }
 
 func newMergeIterator(sources []Iterator, reverse bool) *mergeIterator {
@@ -484,20 +485,26 @@ func newMergeIterator(sources []Iterator, reverse bool) *mergeIterator {
 		return a.index < b.index
 	})
 
+	mi := &mergeIterator{heap: heap, sources: sources}
 	for idx, source := range sources {
 		if source.Next() {
-			heap.Push(mergeEntry{
+			mi.heap.Push(mergeEntry{
 				current: source.Current(),
 				index:   idx,
 				source:  source,
 			})
+		} else if err := source.Err(); err != nil {
+			mi.err = err
 		}
 	}
 
-	return &mergeIterator{heap: heap, sources: sources}
+	return mi
 }
 
 func (it *mergeIterator) Next() bool {
+	if it.err != nil {
+		return false
+	}
 	for it.heap.Len() > 0 {
 		entry := it.heap.Pop()
 
@@ -508,6 +515,9 @@ func (it *mergeIterator) Next() bool {
 				index:   entry.index,
 				source:  entry.source,
 			})
+		} else if err := entry.source.Err(); err != nil {
+			it.err = err
+			return false
 		}
 
 		// Skip duplicate user_keys — the first pop from the lowest-index
@@ -526,14 +536,18 @@ func (it *mergeIterator) Current() KeyValue {
 	return it.current
 }
 
+func (it *mergeIterator) Err() error {
+	return it.err
+}
+
 func (it *mergeIterator) Close() error {
-	var err error
-
+	var errs []error
 	for _, source := range it.sources {
-		err = source.Close()
+		if err := source.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
-
-	return err
+	return errors.Join(errs...)
 }
 
 func (e *Engine) Scan(lo Key, hi Key) Iterator {
@@ -581,6 +595,7 @@ func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts 
 	for _, s := range l0ssts {
 		handle, err := e.fileTable.getOrOpen(s.path)
 		if err != nil {
+			sources = append(sources, &errorIterator{err: err})
 			continue
 		}
 		sources = append(sources, s.Iterator(lo, hi, handle, reverse))
@@ -591,6 +606,7 @@ func (e *Engine) scan(lo Key, hi Key, memtable *memtable, l0ssts []*sst, l1ssts 
 	if len(l1ssts) == 1 {
 		handle, err := e.fileTable.getOrOpen(l1ssts[0].path)
 		if err != nil {
+			sources = append(sources, &errorIterator{err: err})
 			return newMergeIterator(sources, reverse)
 		}
 		sources = append(sources, l1ssts[0].Iterator(lo, hi, handle, reverse))

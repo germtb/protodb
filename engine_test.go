@@ -516,6 +516,41 @@ func TestEngineScanMultipleSSTs(t *testing.T) {
 	}
 }
 
+// --- Scan error handling ---
+
+// TestEngineScanReportsL0OpenError verifies that when an L0 SST file is
+// missing, the scan surfaces an error via Err() instead of silently
+// returning incomplete results.
+func TestEngineScanReportsL0OpenError(t *testing.T) {
+	engine := openTestEngine(t)
+
+	// Flush key(1) into L0 SST #1
+	engine.Put(key(1), []byte("a"))
+	engine.Flush()
+
+	// Flush key(2) into L0 SST #2
+	engine.Put(key(2), []byte("b"))
+	engine.Flush()
+
+	// Delete one of the L0 SST files on disk and evict it from the fd cache
+	// so the next open fails.
+	l0ssts := engine.L0SSTs()
+	if len(l0ssts) < 2 {
+		t.Fatalf("expected >=2 L0 SSTs, got %d", len(l0ssts))
+	}
+	victim := l0ssts[len(l0ssts)-1] // oldest L0 SST
+	engine.fileTable.Clear()
+	os.Remove(victim.path)
+
+	// Scan the full range. The iterator should report an error.
+	iter := engine.Scan(key(0), key(10))
+	for iter.Next() {
+	}
+	if iter.Err() == nil {
+		t.Fatal("expected Scan to report an error for missing L0 SST, got nil")
+	}
+}
+
 // --- ReverseScan ---
 
 func TestEngineReverseScanMemtableOnly(t *testing.T) {
